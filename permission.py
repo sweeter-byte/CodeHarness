@@ -5,41 +5,43 @@ from pathlib import Path
 # ── Level 1: Deny List ───────────────────────────────────────
 # Commands matching these patterns are ALWAYS rejected, no user prompt.
 DENY_LIST = [
-    r"rm\s+-rf\s+/",
-    r"mkfs\.",
-    r"dd\s+if=.+of=/dev/",
-    r">\s*/dev/sd",
-    r"chmod\s+-R\s+777\s+/",
-    r":\(\)\s*\{",
+    r"rm\s+-rf\s+/", # rm -rf /
+    r"mkfs\.", # mkfs.
+    r"dd\s+if=.+of=/dev/", # dd if=of=/dev/
+    r">\s*/dev/sd", # > /dev/sd
+    r"chmod\s+-R\s+777\s+/", # chmod -R 777 /
+    r":\(\)\s*\{", # :(){ :; };
     r"shutdown",
     r"reboot",
     r"halt",
     r"poweroff",
-    r"init\s+0",
+    r"init\s+0", # init 0
 ]
 DENY_PATTERNS = [re.compile(p, re.IGNORECASE) for p in DENY_LIST]
 
 # ── Level 2: Ask Rules ───────────────────────────────────────
 # Commands matching these patterns require user approval.
-ASK_RULES = [
-    re.compile(r"sudo\s+", re.IGNORECASE),
-    re.compile(r"pip\s+install", re.IGNORECASE),
-    re.compile(r"apt(-get)?\s+(install|remove|purge)", re.IGNORECASE),
-    re.compile(r"npm\s+(install|uninstall)", re.IGNORECASE),
-    re.compile(r"curl\s+.+\|\s*(bash|sh)", re.IGNORECASE),
-    re.compile(r"wget\s+.+\|\s*(bash|sh)", re.IGNORECASE),
-    re.compile(r"git\s+push", re.IGNORECASE),
-    re.compile(r"docker\s+(rm|stop|kill|rmi)", re.IGNORECASE),
-    re.compile(r"chmod\s+777", re.IGNORECASE),
-    re.compile(r"mv\s+.*\s+/", re.IGNORECASE),
-    re.compile(r"cp\s+-r", re.IGNORECASE),
-    re.compile(r"kill\s+-9", re.IGNORECASE),
-    re.compile(r"\brm\s+", re.IGNORECASE),
-    re.compile(r"\bmkdir\s+", re.IGNORECASE),
-    re.compile(r"\btouch\s+", re.IGNORECASE),
-    re.compile(r"\btee\s+", re.IGNORECASE),
-    re.compile(r"\btruncate\s+", re.IGNORECASE),
+ASK_RULES_RAW = [
+    r"sudo\s+",
+    r"pip\s+install",
+    r"apt(-get)?\s+(install|remove|purge)",
+    r"npm\s+(install|uninstall)",
+    r"curl\s+.+\|\s*(bash|sh)",
+    r"wget\s+.+\|\s*(bash|sh)",
+    r"git\s+push",
+    r"docker\s+(rm|stop|kill|rmi)",
+    r"chmod\s+777",
+    r"mv\s+.*\s+/",
+    r"cp\s+-r",
+    r"kill\s+-9",
+    r"\brm\s+",
+    r"\bmkdir\s+",
+    r"\btouch\s+",
+    r"\btouch\s+",
+    r"\btee\s+",
+    r"\btruncate\s+",
 ]
+ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 
 # Tools that are read-only and always auto-allowed.
 SAFE_TOOLS_AUTO = {"glob", "grep"}
