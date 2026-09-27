@@ -34,6 +34,11 @@ ASK_RULES = [
     re.compile(r"mv\s+.*\s+/", re.IGNORECASE),
     re.compile(r"cp\s+-r", re.IGNORECASE),
     re.compile(r"kill\s+-9", re.IGNORECASE),
+    re.compile(r"\brm\s+", re.IGNORECASE),
+    re.compile(r"\bmkdir\s+", re.IGNORECASE),
+    re.compile(r"\btouch\s+", re.IGNORECASE),
+    re.compile(r"\btee\s+", re.IGNORECASE),
+    re.compile(r"\btruncate\s+", re.IGNORECASE),
 ]
 
 # Tools that are read-only and always auto-allowed.
@@ -41,16 +46,6 @@ SAFE_TOOLS_AUTO = {"glob", "grep"}
 
 
 class PermissionManager:
-    """
-    Two-layer permission gateway:
-      Layer 1 - Safe path: all file paths must be within allowed_dirs.
-      Layer 2 - Three-level valve:
-        Level 1: Deny list  -> always reject
-        Level 2: Ask rules  -> require user approval
-        Level 3: Fallback   -> file-write tools require approval,
-                               everything else auto-allowed
-    """
-
     def __init__(self, allowed_dirs: list[str] | None = None):
         if allowed_dirs:
             self.allowed_dirs = [Path(d).resolve() for d in allowed_dirs]
@@ -68,7 +63,7 @@ class PermissionManager:
 
     def _is_path_safe(self, path_str: str) -> bool:
         try:
-            p = Path(path_str).resolve()
+            p = Path(path_str).expanduser().resolve()
         except (OSError, ValueError):
             return False
         return any(self._is_subpath(p, d) for d in self.allowed_dirs)
@@ -90,7 +85,7 @@ class PermissionManager:
     def _extract_bash_paths(self, command: str) -> list[str]:
         paths = []
         for match in re.finditer(
-            r"(?:cat|less|more|head|tail|vim|nano|vi|open)\s+(\S+)", command
+            r"(?:cat|less|more|head|tail|vim|nano|vi|open|mkdir)\s+(?:-\S+\s+)*(\S+)", command
         ):
             paths.append(match.group(1))
         for match in re.finditer(r"(?:>>|>)\s*(\S+)", command):
