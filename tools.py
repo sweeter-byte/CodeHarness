@@ -1,0 +1,210 @@
+import os
+import re
+import subprocess
+from pathlib import Path
+
+# ── Tool Schemas ─────────────────────────────────────────────
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command in the working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command to execute."},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the content of a file. Optionally read a specific line range.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to read."},
+                    "start_line": {"type": "integer", "description": "1-based start line (optional)."},
+                    "end_line": {"type": "integer", "description": "1-based end line, inclusive (optional)."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file with the given content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write."},
+                    "content": {"type": "string", "description": "Content to write into the file."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace a specific text block in a file. old_text must match exactly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to edit."},
+                    "old_text": {"type": "string", "description": "Exact text to find and replace."},
+                    "new_text": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "Find files matching a glob pattern relative to the working directory. e.g. '**/*.py'",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py' or 'src/**/*.ts'."},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Search file contents using a regex pattern. Returns matching lines with file paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search for."},
+                    "path": {"type": "string", "description": "File or directory to search in. Defaults to current directory."},
+                    "file_pattern": {"type": "string", "description": "Optional glob to filter files, e.g. '*.py'."},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
+
+# ── Tool Implementations ─────────────────────────────────────
+
+def run_bash(command: str) -> str:
+    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
+    if any(d in command for d in dangerous):
+        return "Error: Dangerous command blocked"
+    try:
+        r = subprocess.run(
+            command, shell=True, cwd=os.getcwd(),
+            capture_output=True, text=True, errors="replace", timeout=120,
+        )
+        out = (r.stdout + r.stderr).strip()
+        return out[:50000] if out else "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Timeout (120s)"
+    except (FileNotFoundError, OSError) as e:
+        return f"Error: {e}"
+
+
+def run_read(path: str, start_line: int = None, end_line: int = None) -> str:
+    p = Path(path)
+    if not p.exists():
+        return f"Error: File not found: {path}"
+    try:
+        lines = p.read_text(errors="replace").splitlines(keepends=True)
+    except Exception as e:
+        return f"Error: {e}"
+    if start_line is not None or end_line is not None:
+        s = (start_line or 1) - 1
+        e = end_line or len(lines)
+        lines = lines[s:e]
+        offset = s
+    else:
+        offset = 0
+    numbered = [f"{i + offset + 1:>5}\t{line}" for i, line in enumerate(lines)]
+    return "".join(numbered).rstrip() or "(empty file)"
+
+
+def run_write(path: str, content: str) -> str:
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        return f"Written {len(content)} chars to {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def run_edit(path: str, old_text: str, new_text: str) -> str:
+    p = Path(path)
+    if not p.exists():
+        return f"Error: File not found: {path}"
+    try:
+        text = p.read_text(errors="replace")
+    except Exception as e:
+        return f"Error: {e}"
+    count = text.count(old_text)
+    if count == 0:
+        return "Error: old_text not found in file"
+    if count > 1:
+        return f"Error: old_text found {count} times, must be unique"
+    text = text.replace(old_text, new_text, 1)
+    p.write_text(text)
+    return f"Edited {path}"
+
+
+def run_glob(pattern: str) -> str:
+    matches = sorted(Path(os.getcwd()).glob(pattern))
+    if not matches:
+        return "(no matches)"
+    return "\n".join(str(m.relative_to(os.getcwd())) for m in matches[:200])
+
+
+def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return f"Error: Invalid regex: {e}"
+    root = Path(path)
+    if not root.exists():
+        return f"Error: Path not found: {path}"
+    results = []
+    files = [root] if root.is_file() else root.rglob(file_pattern or "*")
+    for f in files:
+        if not f.is_file():
+            continue
+        try:
+            for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                if regex.search(line):
+                    rel = f.relative_to(os.getcwd())
+                    results.append(f"{rel}:{i}: {line.strip()}")
+        except (PermissionError, OSError):
+            continue
+        if len(results) > 500:
+            results.append("... (truncated)")
+            break
+    return "\n".join(results) if results else "(no matches)"
+
+
+# ── Tool Handler Map ──────────────────────────────────────────
+
+TOOL_HANDLERS = {
+    "bash":       run_bash,
+    "read_file":  run_read,
+    "write_file": run_write,
+    "edit_file":  run_edit,
+    "glob":       run_glob,
+    "grep":       run_grep,
+}
