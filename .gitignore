@@ -29,3 +29,6 @@ htmlcov/
 examples/
 # Context management runtime data
 .codeharness/
+
+# Memory storage (local persistent knowledge)
+.memory/

@@ -8,6 +8,7 @@ from hooks import SESSION_STATS, trigger_hooks
 from context.budget import ContextBudget
 from context.token_counter import TokenCounter
 from context.manager import ContextManager
+from memory import MemoryManager
 
 load_dotenv(override=True)
 
@@ -21,13 +22,19 @@ MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "1048576"))
 class Agent:
     def __init__(self, system: str = None, tools: list = None,
                  handlers: dict = None, max_rounds: int = None,
-                 todo_manager: TodoManager = None):
+                 todo_manager: TodoManager = None,
+                 memory_manager: MemoryManager = None):
         self.client = OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
         )
         self.model = os.environ["DEEPSEEK_MODEL_ID"]
-        self.system = system or (
+
+        # ── Memory Management ──
+        self.memory_manager = memory_manager if memory_manager is not None \
+            else MemoryManager(client=self.client, model=self.model)
+
+        base_system = system or (
             f"You are a coding agent at {os.getcwd()}. Use tools to solve tasks. Act, don't explain.\n"
             f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
             "then update item statuses as you work; keep exactly one item in_progress.\n"
@@ -36,6 +43,9 @@ class Agent:
             f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
             "Use load_skill to read the full instructions when a skill applies."
         )
+
+        memory_block = self.memory_manager.load_relevant([])
+        self.system = base_system + memory_block if memory_block else base_system
         self.tools = tools if tools is not None else TOOLS
         self.handlers = handlers if handlers is not None else TOOL_HANDLERS
         self.max_rounds = max_rounds
@@ -134,6 +144,13 @@ class Agent:
         rounds_since_todo = 0
         rounds = 0
         reactive_retries = 0
+        normal_exit = True
+
+        # ── Memory Recall: load relevant memories for this request ──
+        if messages and self.memory_manager:
+            memory_block = self.memory_manager.load_relevant(messages)
+            if memory_block:
+                self.system = self.system.rstrip() + memory_block
 
         # Track active request (Protected Context)
         for msg in reversed(messages):
@@ -145,6 +162,7 @@ class Agent:
 
         while True:
             if self.max_rounds is not None and rounds >= self.max_rounds:
+                normal_exit = False
                 return f"Agent stopped after {self.max_rounds} rounds without a final answer."
             rounds += 1
 
@@ -153,6 +171,7 @@ class Agent:
 
             # If user rejected too many times, force-stop the loop.
             if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
+                normal_exit = False
                 messages.append({
                     "role": "user",
                     "content": f"The user has rejected {consecutive_rejections} consecutive operations. "
@@ -180,6 +199,9 @@ class Agent:
             messages.append(msg.model_dump())
 
             if not msg.tool_calls:
+                if normal_exit and self.memory_manager:
+                    self.memory_manager.extract_memories(messages)
+                    self.memory_manager.consolidate_memories()
                 return msg.content or ""
 
             for tc in msg.tool_calls:
