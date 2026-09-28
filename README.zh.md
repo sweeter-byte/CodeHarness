@@ -38,3 +38,22 @@ Permission是设计在LLM给出工具和工具执行前的一层Harness，目的
 - 增加更多DENY_LIST / ASK_RULES规则
 - 支持"本次会话记住选择"等更智能的审批策略
 
+## Hook
+
+对于Coding Agent Cycle，我们定义了四个关键节点：
+- UserPromptSubmit
+- PreToolUse
+- PostToolUse
+- Stop
+每个节点可以包含一系列的hooks，以使得Agent Loop只关注核心逻辑，其余权限检查、token统计等，交付给hook实现。
+
+| 节点                   | Hook  | 职责                                         |
+| -------------------- | ----- | ------------------------------------------ |
+| **UserPromptSubmit** | 上下文注入 | 打印当前工作目录等环境信息                              |
+| **PreToolUse**       | 隐私掩码  | 检测命令/参数中的敏感信息（API Key、密码等），发现则阻止执行         |
+|                      | 权限检查  | 迁移 `PermissionManager.check()`，返回拒绝标记供循环计数 |
+|                      | 调用日志  | 打印工具名称和参数                                  |
+| **PostToolUse**      | 输出展示  | 打印工具输出（截断）+ 大文件警告                          |
+| **Stop**             | 会话统计  | 打印工具调用次数 + 累计 token 消耗                     |
+
+
