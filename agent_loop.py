@@ -104,7 +104,6 @@ class Agent:
                 response = self._call_llm(messages)
                 msg = response.choices[0].message
                 messages.append(msg.model_dump())
-                trigger_hooks("Stop", SESSION_STATS)
                 return
 
             response = self._call_llm(messages)
@@ -112,7 +111,6 @@ class Agent:
             messages.append(msg.model_dump())
 
             if not msg.tool_calls:
-                trigger_hooks("Stop", SESSION_STATS)
                 return
 
             for tc in msg.tool_calls:
@@ -156,3 +154,6 @@ if __name__ == "__main__":
         if last.get("content"):
             print(last["content"])
         print()
+
+    # Session ended 
+    trigger_hooks("Stop", SESSION_STATS)
