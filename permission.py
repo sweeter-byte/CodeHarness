@@ -43,8 +43,8 @@ ASK_RULES_RAW = [
 ]
 ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 
-# Tools that are read-only and always auto-allowed.
-SAFE_TOOLS_AUTO = {"glob", "grep"}
+# Tools that are read-only / side-effect-free and always auto-allowed.
+SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write"}
 
 
 class PermissionManager:

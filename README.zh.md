@@ -57,3 +57,6 @@ Permission是设计在LLM给出工具和工具执行前的一层Harness，目的
 | **Stop**             | 会话统计  | 打印工具调用次数 + 累计 token 消耗                     |
 
 
+## TODO Write
+
+增加`TODO List`，以增强Agent系统的**规划能力**，原系统的执行能力不会变化。此外，增加`Reminder`机制，以保证Agent不会以往最初的`TODO List`。最后，还需要在System Prompt内引导模型**先规划再行动**

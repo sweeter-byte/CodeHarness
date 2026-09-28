@@ -2,13 +2,15 @@ import json
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from tools import TOOLS, TOOL_HANDLERS
+from tools import TOOLS, TOOL_HANDLERS, TODO
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
 
 load_dotenv(override=True)
 
 MAX_CONSECUTIVE_REJECTIONS = 3
+TODO_TOOL_NAME = "todo_write"
+TODO_REMINDER_ROUNDS = 3
 
 
 class Agent:
@@ -18,7 +20,11 @@ class Agent:
             base_url=os.environ["DEEPSEEK_BASE_URL"],
         )
         self.model = os.environ["DEEPSEEK_MODEL_ID"]
-        self.system = f"You are a coding agent at {os.getcwd()}. Use tools to solve tasks. Act, don't explain."
+        self.system = (
+            f"You are a coding agent at {os.getcwd()}. Use tools to solve tasks. Act, don't explain.\n"
+            f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
+            "then update item statuses as you work; keep exactly one item in_progress."
+        )
 
     def _accumulate_tokens(self, response):
         """Add token usage from an LLM response to SESSION_STATS."""
@@ -90,6 +96,7 @@ class Agent:
 
     def agent_loop(self, messages: list):
         consecutive_rejections = 0
+        rounds_since_todo = 0
 
         while True:
             # If user rejected too many times, force-stop the loop.
@@ -131,6 +138,21 @@ class Agent:
                     consecutive_rejections += 1
                 else:
                     consecutive_rejections = 0
+
+            # ── Todo reminder (催更机制) ──
+            # Count once per round; using todo_write in this round resets it.
+            if any(tc.function.name == TODO_TOOL_NAME for tc in msg.tool_calls):
+                rounds_since_todo = 0
+            else:
+                rounds_since_todo += 1
+                if rounds_since_todo >= TODO_REMINDER_ROUNDS:
+                    # messages[-1] is this round's last tool message; rewrite its
+                    # content to inject the reminder (tool_call_id cannot be reused).
+                    messages[-1]["content"] += (
+                        f"\n\n<reminder>Call {TODO_TOOL_NAME} to update your todos.</reminder>\n"
+                        + TODO.render()
+                    )
+                    rounds_since_todo = 0
 
 
 if __name__ == "__main__":
