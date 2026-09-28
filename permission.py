@@ -44,7 +44,9 @@ ASK_RULES_RAW = [
 ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 
 # Tools that are read-only / side-effect-free and always auto-allowed.
-SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write"}
+# 'task' (delegation) is safe itself; risk control happens on each of the
+# subagent's own tool calls, which go through the same permission gates.
+SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write", "task"}
 
 
 class PermissionManager:
@@ -90,8 +92,11 @@ class PermissionManager:
             r"(?:cat|less|more|head|tail|vim|nano|vi|open|mkdir)\s+(?:-\S+\s+)*(\S+)", command
         ):
             paths.append(match.group(1))
+            
+        _SYSTEM_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
         for match in re.finditer(r"(?:>>|>)\s*(\S+)", command):
-            paths.append(match.group(1))
+            if match.group(1) not in _SYSTEM_SINKS:
+                paths.append(match.group(1))
         return paths
 
     # ── Main check ────────────────────────────────────────────
