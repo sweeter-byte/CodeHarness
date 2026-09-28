@@ -68,3 +68,78 @@ Permission是设计在LLM给出工具和工具执行前的一层Harness，目的
 ## Skill Loader
 
 本质上是做分层加载构建`System Prompt`,使得其更灵活,避免稀释注意力.Skills本身可以看作说一种特殊的Tool,在Tools模块内实现即可.对应的`catalog`和`load`在新的模块中实现.
+
+## Context Management
+
+上下文管理是一个比较复杂的模块,它涉及到如何管理一块有限的"内存",后续能够借鉴操作系统中内存管理模块的一些优雅的设计.相关设计原则为
+1. Token 为统一预算单位，所有阈值从 ContextBudget 推导
+2. 确定性操作优先，Layer 0-3 无损/可恢复，Layer 4 有损最后执行
+3. Tool Pair 不可切割，tool_use 和 tool_result 一起保留或一起归档
+4. Active Request 显式保护，不依赖"碰巧还在 Tail 中"
+5. 外置 + 重载入成对设计，信息从 In-Context 变为 Load-On-Demand
+6. 滞回机制，Trigger 和 Target 分离避免抖动
+7. 异常恢复独立路径，API overflow 走 reactive_compact，最多重试 1 次
+8. 与 Subagent 互补，Subagent 提供 Context Isolation，避免主 Context 污染
+
+当前设计了四层压缩机制:
+- 转存:单个工具结果超过阈值时,转存到磁盘.实现单条消息长度可控
+- 裁剪:当消息数或总token数超出阈值时,需要对中间消息进行归档.实现消息总数可控
+- 淘汰:当总token数超出上下文窗口上限时,对模型已读的结果进行归档.以保证API调用成功(不一定百分百成功)
+- 摘要:调用LLM实现语义压缩,随后开启新对话.
+
+对应的模块:
+```text
+CodeHarness/
+├── context/
+│   ├── __init__.py
+│   ├── budget.py           # ContextBudget 预算计算
+│   ├── token_counter.py    # Token 计数（优先用 API 返回值，备用本地估算）
+│   ├── artifact_store.py   # 大结果外置存储 + 重新载入
+│   ├── checkpoint.py       # ContextCheckpoint 结构化检查点
+│   ├── compactor.py        # Layer 4 语义压缩后端
+│   └── manager.py          # ContextManager 主入口，串联所有 Layer
+├── agent_loop.py           # 改造：集成 ContextManager
+├── tools.py                # 改造：新增 read_artifact 工具
+├── hooks.py                # 改造：新增 Context Observability hook
+└── ...
+```
+
+设计的数据流向是
+```text
+                    agent_loop
+                        │
+                  ┌─────┴─────┐
+                  │           │
+                  ▼           ▼
+           ContextManager   Model.call()
+                │
+    ┌───────────┼───────────┐
+    │           │           │
+    ▼           ▼           ▼
+ Budget     ArtifactStore   Compactor
+    │           │               │
+    ▼           ▼               ├── LLM Summary
+TokenCounter  .artifacts/       └── Checkpoint
+```
+
+为避免压缩完后立刻又触发压缩,设计来"滞回机制",本质就是设置一系列阈值,不同阈值间有缓冲空间.
+```text
+0% ───────────────────────────
+60% ───── Compact Target (压缩后尽量回到这里)
+80% ───── Soft Limit (开始自动压缩)
+90% ───── Hard Limit (紧急，跳过 Layer 2/3 直接 Layer 4)
+100% ──── Provider Context Limit
+```
+
+上下文压缩触发的几种机制:
+
+| Trigger              | 触发方式                                        | 实现位置                                    |
+| -------------------- | ------------------------------------------- | --------------------------------------- |
+| **Auto Trigger**     | 当前窗口的token数超出预设阈值时 | `ContextManager.prepare()`              |
+| **Manual Trigger**   | 用户输入 `/compact`                             | `hooks.py` 的 `UserPromptSubmit` hook 拦截 |
+| **Model Trigger**    | 模型调用 `compact` 工具                     | agent_loop 中检测 tool_call                |
+| **Reactive Trigger** | API 返回 context overflow 异常                  | `_call_llm` 的 except 分支                 |
+| **Reset**            | 用户输入 `/clear`                               | 主循环中清空 history                          |
+
+
+为了更好的测试上下文压缩等情况,可以在`.env`文件中调整上下文窗口大小.

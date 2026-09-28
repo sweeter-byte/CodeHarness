@@ -5,12 +5,17 @@ from openai import OpenAI
 from tools import TOOLS, TOOL_HANDLERS, TODO, TodoManager, SKILL_LOADER
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
+from context.budget import ContextBudget
+from context.token_counter import TokenCounter
+from context.manager import ContextManager
 
 load_dotenv(override=True)
 
 MAX_CONSECUTIVE_REJECTIONS = 3
 TODO_TOOL_NAME = "todo_write"
 TODO_REMINDER_ROUNDS = 3
+MAX_REACTIVE_RETRIES = 1
+MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "1048576"))
 
 
 class Agent:
@@ -36,6 +41,23 @@ class Agent:
         self.max_rounds = max_rounds
         self.todo_manager = todo_manager if todo_manager is not None else TODO
 
+        # ── Context Management ──
+        self.token_counter = TokenCounter()
+        _fixed = self.token_counter.estimate_tokens(self.system) + \
+                 self.token_counter.estimate_tokens(str(self.tools))
+        self.context_budget = ContextBudget.from_model_config(
+            model_window=MODEL_CONTEXT_WINDOW,
+            max_output_tokens=8000,
+            fixed_context_tokens=_fixed,
+        )
+        self.context_manager = ContextManager(
+            budget=self.context_budget,
+            token_counter=self.token_counter,
+        )
+        self.context_manager.configure_llm(self.client, self.model)
+        self.context_manager.system_prompt = self.system
+        self.context_manager.tool_schemas = self.tools
+
     def _accumulate_tokens(self, response):
         """Add token usage from an LLM response to SESSION_STATS."""
         if response.usage:
@@ -52,6 +74,7 @@ class Agent:
             max_tokens=8000,
         )
         self._accumulate_tokens(response)
+        self.token_counter.update_from_response(response)
         return response
 
     def _execute_tool(self, handler, tool_call_id, tool_name, args, messages):
@@ -110,11 +133,23 @@ class Agent:
         consecutive_rejections = 0
         rounds_since_todo = 0
         rounds = 0
+        reactive_retries = 0
+
+        # Track active request (Protected Context)
+        for msg in reversed(messages):
+            if msg.get("role") == "user" and not msg.get("tool_call_id"):
+                self.context_manager.set_active_request(
+                    str(msg.get("content", ""))
+                )
+                break
 
         while True:
             if self.max_rounds is not None and rounds >= self.max_rounds:
                 return f"Agent stopped after {self.max_rounds} rounds without a final answer."
             rounds += 1
+
+            # ── Context Management: prepare before LLM call ──
+            messages[:] = self.context_manager.prepare(messages)
 
             # If user rejected too many times, force-stop the loop.
             if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
@@ -130,7 +165,17 @@ class Agent:
                 messages.append(msg.model_dump())
                 return msg.content or ""
 
-            response = self._call_llm(messages)
+            try:
+                response = self._call_llm(messages)
+            except Exception as e:
+                if ("context" in str(e).lower() or "token" in str(e).lower()
+                        ) and reactive_retries < MAX_REACTIVE_RETRIES:
+                    print("\033[33m⚠ Context overflow, reactive compacting...\033[0m")
+                    messages[:] = self.context_manager.reactive_compact(messages)
+                    reactive_retries += 1
+                    continue
+                raise
+            reactive_retries = 0
             msg = response.choices[0].message
             messages.append(msg.model_dump())
 
@@ -171,6 +216,25 @@ class Agent:
                     )
                     rounds_since_todo = 0
 
+    def handle_slash_command(self, query: str, history: list) -> bool:
+        """Handle /context, /compact, /clear. Returns True if handled."""
+        cmd = query.strip().lower()
+        if not cmd.startswith("/"):
+            return False
+        if cmd == "/context":
+            print(self.context_manager.get_observability_report(history))
+        elif cmd == "/compact":
+            history[:] = self.context_manager.compact_history(history)
+            print("\033[33m✓ Context compacted.\033[0m")
+        elif cmd == "/clear":
+            history.clear()
+            self.context_manager.set_active_request("")
+            print("\033[33m✓ Context cleared.\033[0m")
+        else:
+            print(f"Unknown command: {cmd}")
+            print("Available: /context, /compact, /clear")
+        return True
+
 
 if __name__ == "__main__":
     from subagent import TASK_TOOL, TASK_HANDLERS
@@ -181,7 +245,7 @@ if __name__ == "__main__":
     TOOL_HANDLERS.update(TASK_HANDLERS)
 
     agent = Agent()
-    print("Agent Loop (type q to quit)\n")
+    print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
 
     history = []
     while True:
@@ -191,6 +255,10 @@ if __name__ == "__main__":
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
+
+        # ── Slash Commands (intercepted before entering agent loop) ──
+        if agent.handle_slash_command(query, history):
+            continue
 
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})

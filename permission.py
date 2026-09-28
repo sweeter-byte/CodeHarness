@@ -94,7 +94,7 @@ class PermissionManager:
             paths.append(match.group(1))
             
         _SYSTEM_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
-        for match in re.finditer(r"(?:>>|>)\s*(\S+)", command):
+        for match in re.finditer(r"(?:\d*>>|\d*>)\s*(\S+)", command):
             if match.group(1) not in _SYSTEM_SINKS:
                 paths.append(match.group(1))
         return paths

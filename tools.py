@@ -160,6 +160,35 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_artifact",
+            "description": (
+                "Read a previously saved artifact by its ID. "
+                "Use when you see 'artifact://xxx' references in earlier tool results "
+                "and need the full content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "The artifact ID from an artifact:// reference.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based start line (optional, for large artifacts).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of lines to return (optional).",
+                    },
+                },
+                "required": ["artifact_id"],
+            },
+        },
+    },
 ]
 
 # ── Tool Implementations ─────────────────────────────────────
@@ -171,7 +200,24 @@ def run_bash(command: str) -> str:
             capture_output=True, text=True, errors="replace", timeout=120,
         )
         out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
+        if not out:
+            return "(no output)"
+        # Layer 0: structured output for large results
+        if len(out) > 30000:
+            from context.artifact_store import ARTIFACT_STORE
+            aid = ARTIFACT_STORE.save(out, prefix="bash")
+            head = out[:2000]
+            tail = out[-500:] if len(out) > 2500 else ""
+            parts = [
+                f"exit_code: {r.returncode}",
+                f"output_size: {len(out)} chars (truncated)",
+                f"preview_head:\n{head}",
+            ]
+            if tail:
+                parts.append(f"preview_tail:\n...{tail}")
+            parts.append(f"full_output: artifact://{aid}")
+            return "\n".join(parts)
+        return out[:50000]
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
     except (FileNotFoundError, OSError) as e:
@@ -229,7 +275,11 @@ def run_glob(pattern: str) -> str:
     matches = sorted(Path(os.getcwd()).glob(pattern))
     if not matches:
         return "(no matches)"
-    return "\n".join(str(m.relative_to(os.getcwd())) for m in matches[:200])
+    lines = [str(m.relative_to(os.getcwd())) for m in matches[:200]]
+    if len(matches) > 200:
+        lines.append(f"... ({len(matches)} total matches, showing first 200. "
+                     "Use a more specific pattern to narrow results.)")
+    return "\n".join(lines)
 
 
 def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
@@ -253,7 +303,10 @@ def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
         except (PermissionError, OSError):
             continue
         if len(results) > 500:
-            results.append("... (truncated)")
+            results.append(
+                f"... (truncated at 500 matches. "
+                "Use a more specific pattern or file_pattern to narrow results.)"
+            )
             break
     return "\n".join(results) if results else "(no matches)"
 
@@ -335,6 +388,12 @@ def run_load_skill(name: str) -> str:
     return SKILL_LOADER.load(name)
 
 
+def run_read_artifact(artifact_id: str, offset: int = None, limit: int = None) -> str:
+    """Rehydration: read back a previously externalized artifact."""
+    from context.artifact_store import ARTIFACT_STORE
+    return ARTIFACT_STORE.read(artifact_id, offset, limit)
+
+
 # ── Tool Handler Map ──────────────────────────────────────────
 
 TOOL_HANDLERS = {
@@ -346,4 +405,5 @@ TOOL_HANDLERS = {
     "grep":       run_grep,
     "todo_write": run_todo_write,
     "load_skill": run_load_skill,
+    "read_artifact": run_read_artifact,
 }
