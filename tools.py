@@ -296,6 +296,15 @@ def run_todo_write(todos: list | str) -> str:
     return output
 
 
+def make_todo_handler(manager: TodoManager):
+    """Build a todo_write handler bound to a per-agent TodoManager instance."""
+    def handler(todos: list | str) -> str:
+        output = manager.update(todos)
+        print(output)
+        return output
+    return handler
+
+
 # ── Tool Handler Map ──────────────────────────────────────────
 
 TOOL_HANDLERS = {
