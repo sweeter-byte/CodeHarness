@@ -18,7 +18,7 @@ def register_hook(event: str, callback):
 
 
 def trigger_hooks(event: str, *args):
-    """Run all callbacks for *event*. First non-None return stops the chain."""
+    """Run all callbacks for event. First non-None return stops the chain."""
     for callback in HOOKS[event]:
         result = callback(*args)
         if result is not None:
@@ -71,7 +71,7 @@ _MASK = "***REDACTED***"
 
 
 def _mask_text(text: str) -> str:
-    """Replace all sensitive patterns in *text* with a mask."""
+    """Replace all sensitive patterns in text with a mask."""
     for pattern in _SENSITIVE_PATTERNS:
         text = pattern.sub(_MASK, text)
     text = _ASSIGNMENT_PATTERN.sub(
