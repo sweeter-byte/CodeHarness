@@ -2,7 +2,7 @@ import json
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from tools import TOOLS, TOOL_HANDLERS, TODO, TodoManager
+from tools import TOOLS, TOOL_HANDLERS, TODO, TodoManager, SKILL_LOADER
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
 
@@ -27,7 +27,9 @@ class Agent:
             f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
             "then update item statuses as you work; keep exactly one item in_progress.\n"
             "Delegate self-contained subtasks (e.g. tracing a call chain across many files) "
-            "to the 'task' tool so their intermediate steps don't pollute your context."
+            "to the 'task' tool so their intermediate steps don't pollute your context.\n\n"
+            f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
+            "Use load_skill to read the full instructions when a skill applies."
         )
         self.tools = tools if tools is not None else TOOLS
         self.handlers = handlers if handlers is not None else TOOL_HANDLERS

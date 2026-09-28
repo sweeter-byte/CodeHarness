@@ -4,6 +4,12 @@ import re
 import subprocess
 from pathlib import Path
 
+from skill_loader import SkillLoader
+
+# ── Skill Loader (module-level singleton) ─────────────────────
+SKILL_LOADER = SkillLoader()
+SKILL_LOADER.scan()
+
 # ── Tool Schemas ─────────────────────────────────────────────
 
 TOOLS = [
@@ -131,6 +137,26 @@ TOOLS = [
                     },
                 },
                 "required": ["todos"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": (
+                "Load the full instructions of a skill by name. "
+                "Use it when a skill's description matches the current task."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The skill name as shown in the skills catalog.",
+                    },
+                },
+                "required": ["name"],
             },
         },
     },
@@ -305,6 +331,10 @@ def make_todo_handler(manager: TodoManager):
     return handler
 
 
+def run_load_skill(name: str) -> str:
+    return SKILL_LOADER.load(name)
+
+
 # ── Tool Handler Map ──────────────────────────────────────────
 
 TOOL_HANDLERS = {
@@ -315,4 +345,5 @@ TOOL_HANDLERS = {
     "glob":       run_glob,
     "grep":       run_grep,
     "todo_write": run_todo_write,
+    "load_skill": run_load_skill,
 }

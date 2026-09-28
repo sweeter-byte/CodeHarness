@@ -46,7 +46,7 @@ ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 # Tools that are read-only / side-effect-free and always auto-allowed.
 # 'task' (delegation) is safe itself; risk control happens on each of the
 # subagent's own tool calls, which go through the same permission gates.
-SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write", "task"}
+SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write", "task", "load_skill"}
 
 
 class PermissionManager:

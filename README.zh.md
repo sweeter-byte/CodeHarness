@@ -64,3 +64,7 @@ Permission是设计在LLM给出工具和工具执行前的一层Harness，目的
 ## SubAgent
 
 `SubAgent`本身可以看作Agent的一个特殊工具.委派只有一层.子Agent继承父Agent除`Task`以外的所有工具.每个子Agent最多执行30轮,避免父Agent无限等待.
+
+## Skill Loader
+
+本质上是做分层加载构建`System Prompt`,使得其更灵活,避免稀释注意力.Skills本身可以看作说一种特殊的Tool,在Tools模块内实现即可.对应的`catalog`和`load`在新的模块中实现.

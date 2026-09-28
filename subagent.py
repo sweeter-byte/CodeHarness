@@ -1,5 +1,5 @@
 import os
-from tools import TOOLS, TOOL_HANDLERS
+from tools import TOOLS, TOOL_HANDLERS, SKILL_LOADER
 
 SUB_SYSTEM = (
     f"You are a subagent at {os.getcwd()}, delegated a specific subtask by a parent agent. "
@@ -8,7 +8,9 @@ SUB_SYSTEM = (
     "plan; skip it for simple tasks.\n"
     "Your intermediate messages are DISCARDED — the parent sees ONLY your final text. "
     "So your last message must be a complete, self-contained summary of the result "
-    "(findings, file changes, or why you failed)."
+    "(findings, file changes, or why you failed).\n\n"
+    f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
+    "Use load_skill to read the full instructions when a skill applies."
 )
 
 SUB_MAX_ROUNDS = 30
