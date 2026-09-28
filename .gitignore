@@ -27,3 +27,5 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 examples/
+# Context management runtime data
+.codeharness/
