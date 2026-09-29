@@ -35,3 +35,6 @@ examples/
 
 # Task system (persistent task graph)
 .tasks/
+
+# Cron scheduler (persistent scheduled tasks)
+.scheduled_tasks.json

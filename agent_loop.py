@@ -290,8 +290,10 @@ class Agent:
 if __name__ == "__main__":
     from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
     from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
+    from tools import TOOL_HANDLERS as TOOLS_HANDLERS_REF
+    import cron_scheduler
 
-    # Compose the parent agent's full tool set: base tools + delegation + task system.
+    # Compose the parent agent's full tool set: base tools + delegation + task system + cron.
     # subagent.py imported SUB_TOOLS before this append, so subagents never see these.
     TOOLS.append(TASK_TOOL)
     TOOLS.extend(TASK_TOOLS)
@@ -302,26 +304,53 @@ if __name__ == "__main__":
     print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
 
     history = []
-    while True:
-        try:
-            query = input("\033[36m>> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
+    # Start cron scheduler with agent and history references
+    cron_scheduler.start(agent=agent, history=history)
 
-        # ── Slash Commands (intercepted before entering agent loop) ──
-        if agent.handle_slash_command(query, history):
-            continue
+    try:
+        while True:
+            try:
+                query = input("\033[36m>> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                break
 
-        trigger_hooks("UserPromptSubmit", query)
-        history.append({"role": "user", "content": query})
-        agent.agent_loop(history)
+            # User has submitted input. Set UI_BUSY so the Queue Processor
+            # defers delivery while we process the message (prevents output
+            # interleaving on the shared terminal). Cleared once agent_lock
+            # is acquired, which blocks the Queue Processor via the lock.
+            cron_scheduler.UI_BUSY = True
 
-        last = history[-1]
-        if last.get("content"):
-            print(last["content"])
-        print()
+            if query.strip().lower() in ("q", "exit", ""):
+                cron_scheduler.UI_BUSY = False
+                break
+
+            # ── Slash Commands (intercepted before entering agent loop) ──
+            if agent.handle_slash_command(query, history):
+                cron_scheduler.UI_BUSY = False
+                continue
+
+            trigger_hooks("UserPromptSubmit", query)
+            # Acquire agent_lock to prevent concurrent cron delivery.
+            # Use a loop with timeout to avoid indefinite blocking if the
+            # queue processor is running a scheduled delivery.
+            while True:
+                if cron_scheduler.agent_lock.acquire(timeout=1):
+                    break
+                print("\033[33m[Wait] A scheduled task is running, waiting...\033[0m")
+            cron_scheduler.UI_BUSY = False
+            try:
+                history.append({"role": "user", "content": query})
+                agent.agent_loop(history)
+            finally:
+                cron_scheduler.agent_lock.release()
+
+            last = history[-1]
+            if last.get("content"):
+                print(last["content"])
+            print()
+    finally:
+        # Stop cron scheduler
+        cron_scheduler.stop()
 
     # Session ended 
     trigger_hooks("Stop", SESSION_STATS)

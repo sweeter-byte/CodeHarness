@@ -198,3 +198,76 @@ class BackgroundManager:
 | `pgid`       | int    | 进程组 ID，用于统一清理子进程                                             |
 | `start_time` | float  | `time.time()` 记录启动时间戳                                        |
 
+
+## Cron Scheduler
+
+将原来系统的单线程运行方式修改为三线程:
+
+| 线程                     | 职责                                | 生命周期     |
+| ---------------------- | --------------------------------- | -------- |
+| 主线程                    | 接收用户输入，驱动 `agent_loop()`          | CLI 存活期间 |
+| Scheduler Thread       | 每秒轮询本地时间，匹配 cron 表达式，到期任务写入持久化后入队 | 同        |
+| Queue Processor Thread | 每 200ms 检查交付队列，等 Agent 空闲后注入消息    | 同        |
+
+CronJob数据结构:
+```python
+@dataclass
+class CronJob:
+    id: str              # "cron_" + 4字节hex，与 task_system 的 "task_" 前缀风格一致
+    cron: str            # 五段式 cron 表达式
+    prompt: str          # 到期后交给 Agent 的任务描述
+    recurring: bool      # True=周期性，False=一次性
+    durable: bool        # True=持久化到磁盘，False=仅内存
+    pending_delivery: bool = False   # 已到期但尚未交付
+    last_fired: str | None = None    # "YYYY-MM-DD HH:MM" 防止同分钟重复入队
+```
+
+CronStore持久化层:将定时任务使用**单文件+原子写入**.
+
+调度线程:
+```text
+每秒循环:
+  1. 获取当前时间 moment
+  2. 计算 minute_marker = moment.strftime("%Y-%m-%d %H:%M")
+  3. 遍历 scheduled_jobs:
+     - 跳过 pending_delivery=True 或 last_fired==minute_marker 的 job
+     - 若 cron_matches(job.cron, moment):
+       a. 设置 job.pending_delivery = True, job.last_fired = minute_marker
+       b. 原子持久化
+       c. 成功 → 加入 delivery_queue
+       d. 失败 → 回滚，不入队
+```
+
+队列处理线程,用以检查当前Agent是否空闲.使用全局锁`agent_lock`,避免定时任务和用户操作并发修改`history`.
+
+主线程：在 CLI 的 input() 循环中，用户输入后、调用 agent_loop() 前获取锁，agent_loop() 返回后释放。
+
+Queue Processor：每 200ms 尝试 agent_lock.acquire(blocking=False)，成功才交付。
+
+```text
+Queue Processor 获取 agent_lock 成功:
+  1. 从 delivery_queue 取出所有到期 job
+  2. 对每个 job:
+     - history.append({"role": "user", "content": f"[Scheduled] {job.prompt}"})
+  3. 调用 agent.agent_loop(history)
+  4. 交付成功后:
+     - 一次性任务 (recurring=False) → 从 scheduled_jobs 删除，持久化
+     - 周期性任务 → 重置 pending_delivery=False，持久化
+  5. 交付失败（LLM 调用异常）:
+     - 从 history 中移除刚追加的 [Scheduled] 消息
+     - 回退 job 状态（保留 pending_delivery=True），下次重试
+  6. 释放 agent_lock
+```
+
+生命周期管理:
+```text
+CLI 启动
+  ├── 加载 .scheduled_tasks.json → 恢复 durable 任务到 scheduled_jobs
+  ├── 启动 Scheduler Thread（daemon=True）
+  ├── 启动 Queue Processor Thread（daemon=True）
+  └── 进入 input() 循环
+
+CLI 退出（EOFError / KeyboardInterrupt / "q"）
+  ├── stop_event.set()  → 两个线程退出
+  └── trigger_hooks("Stop", SESSION_STATS)
+```

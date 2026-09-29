@@ -197,6 +197,66 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_create",
+            "description": (
+                "Schedule a recurring or one-shot task. The prompt will be delivered "
+                "to the agent at the specified time. Use cron expressions to define timing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cron": {
+                        "type": "string",
+                        "description": "5-field cron expression (minute hour day month weekday).",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Task description delivered to the agent when triggered.",
+                    },
+                    "recurring": {
+                        "type": "boolean",
+                        "description": "True for recurring, False for one-shot. Default True.",
+                    },
+                    "durable": {
+                        "type": "boolean",
+                        "description": "True to persist across restarts. Default True.",
+                    },
+                },
+                "required": ["cron", "prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_list",
+            "description": "Show all scheduled tasks: ID, cron expression, prompt, recurring status.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cron_delete",
+            "description": "Remove a scheduled task by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "ID of the scheduled job to remove.",
+                    },
+                },
+                "required": ["job_id"],
+            },
+        },
+    },
 ]
 
 # ── Tool Implementations ─────────────────────────────────────
@@ -384,6 +444,48 @@ def run_read_artifact(artifact_id: str, offset: int = None, limit: int = None) -
     return ARTIFACT_STORE.read(artifact_id, offset, limit)
 
 
+# ── Cron Scheduler Tools ──────────────────────────────────────
+
+def run_cron_create(cron: str, prompt: str, recurring: bool = True, durable: bool = True) -> str:
+    from cron_scheduler import get_store, validate_cron
+    store = get_store()
+    if store is None:
+        return "Error: Cron scheduler not initialized"
+    err = validate_cron(cron)
+    if err:
+        return f"Error: Invalid cron expression - {err}"
+    if not prompt or not prompt.strip():
+        return "Error: Prompt cannot be empty"
+    job = store.add(cron, prompt.strip(), recurring, durable)
+    return f"Created {job.id}: cron='{job.cron}', recurring={job.recurring}, durable={job.durable}"
+
+
+def run_cron_list() -> str:
+    from cron_scheduler import get_store
+    store = get_store()
+    if store is None:
+        return "(cron scheduler not initialized)"
+    jobs = store.list_all()
+    if not jobs:
+        return "(no scheduled tasks)"
+    lines = []
+    for j in jobs:
+        rec = "recurring" if j.recurring else "one-shot"
+        dur = "durable" if j.durable else "memory"
+        lines.append(f"{j.id} | {j.cron:<15} | {rec:<10} | {dur:<8} | {j.prompt}")
+    return "\n".join(lines)
+
+
+def run_cron_delete(job_id: str) -> str:
+    from cron_scheduler import get_store
+    store = get_store()
+    if store is None:
+        return "Error: Cron scheduler not initialized"
+    if store.remove(job_id):
+        return f"Deleted {job_id}"
+    return f"Error: Job not found: {job_id}"
+
+
 # ── Tool Handler Map ──────────────────────────────────────────
 
 TOOL_HANDLERS = {
@@ -396,4 +498,7 @@ TOOL_HANDLERS = {
     "todo_write": run_todo_write,
     "load_skill": run_load_skill,
     "read_artifact": run_read_artifact,
+    "cron_create": run_cron_create,
+    "cron_list":   run_cron_list,
+    "cron_delete": run_cron_delete,
 }

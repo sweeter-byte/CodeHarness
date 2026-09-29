@@ -100,6 +100,7 @@ def permission_hook(tool_name: str, args: dict):
       deny  → return rejection string (blocks execution)
       ask   → set PENDING_USER_ASK, return None (loop handles the prompt)
       allow → return None
+    During cron turns, 'ask' decisions are rejected instead of prompting.
     """
     global PENDING_USER_ASK
     decision, reason = _perm_manager.check(tool_name, args)
@@ -110,6 +111,13 @@ def permission_hook(tool_name: str, args: dict):
             "Do NOT retry this operation via alternative commands."
         )
     if decision == "ask":
+        # During scheduled (cron) turns, reject interactive approvals
+        from cron_scheduler import CRON_TURN
+        if CRON_TURN:
+            return (
+                f"Error: Interactive approval not available during scheduled execution - {reason}. "
+                "Use non-interactive commands only."
+            )
         PENDING_USER_ASK = reason
         return None
     return None
