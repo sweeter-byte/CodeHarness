@@ -173,3 +173,28 @@ Memory由四个机制实现:
 | `reset_task`    | 无参数                                     |当前项目所有任务状态均为completed时,清空整个`.tasks/`目录   |
 
 注意到,任务编排只能由父Agent完成,子Agent禁用.
+
+## Background Task 
+
+让Agent系统具备异步执行能力.将耗时任务放入后台执行,返回占位结果,后续轮次收集完成的结果并已通知的形式加入到消息里.
+
+BackgroundManager类:后台任务的生命周期管理：启动、状态追踪、结果收集、进程清理.
+```python
+class BackgroundManager:
+    __init__(max_concurrent=3)
+
+    self.max_concurrent: int          # 最大并发后台任务数
+    self.tasks: dict[str, dict]       # bg_id → 任务元信息
+    self.results: dict[str, str]      # bg_id → 完成后的结果文本
+    self._ready: list[str]            # 已完成但尚未被收集的 bg_id 队列
+    self._lock: threading.Lock        # 保护上述共享状态
+    self._counter: int                # 生成递增 bg_id 的计数器
+```
+| 字段           | 类型     | 说明                                                           |
+| ------------ | ------ | ------------------------------------------------------------ |
+| `command`    | str    | 执行的 shell 命令                                                 |
+| `status`     | str    | `running` / `completed` / `failed` / `timeout` / `cancelled` |
+| `thread`     | Thread | daemon 线程引用                                                  |
+| `pgid`       | int    | 进程组 ID，用于统一清理子进程                                             |
+| `start_time` | float  | `time.time()` 记录启动时间戳                                        |
+

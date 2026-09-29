@@ -9,6 +9,7 @@ from context.budget import ContextBudget
 from context.token_counter import TokenCounter
 from context.manager import ContextManager
 from memory import MemoryManager
+from background import BACKGROUND, BackgroundManager, should_run_background
 
 load_dotenv(override=True)
 
@@ -23,7 +24,8 @@ class Agent:
     def __init__(self, system: str = None, tools: list = None,
                  handlers: dict = None, max_rounds: int = None,
                  todo_manager: TodoManager = None,
-                 memory_manager: MemoryManager = None):
+                 memory_manager: MemoryManager = None,
+                 background_manager: BackgroundManager = None):
         self.client = OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -50,6 +52,8 @@ class Agent:
         self.handlers = handlers if handlers is not None else TOOL_HANDLERS
         self.max_rounds = max_rounds
         self.todo_manager = todo_manager if todo_manager is not None else TODO
+        self.background_manager = background_manager if background_manager is not None \
+            else BACKGROUND
 
         # ── Context Management ──
         self.token_counter = TokenCounter()
@@ -118,11 +122,25 @@ class Agent:
                 print("\033[31m  ✗ Rejected by user\033[0m")
                 executed = False
             else:
-                output = handler(**args)
+                if should_run_background(tool_name, args):
+                    bg_id, error = self.background_manager.start(args["command"])
+                    if bg_id is not None:
+                        output = f"[Background task {bg_id} started: {args['command']}]"
+                    else:
+                        output = error
+                else:
+                    output = handler(**args)
                 executed = True
         else:
             # All hooks passed.
-            output = handler(**args)
+            if should_run_background(tool_name, args):
+                bg_id, error = self.background_manager.start(args["command"])
+                if bg_id is not None:
+                    output = f"[Background task {bg_id} started: {args['command']}]"
+                else:
+                    output = error
+            else:
+                output = handler(**args)
             executed = True
 
         # ── PostToolUse ──
@@ -160,83 +178,94 @@ class Agent:
                 )
                 break
 
-        while True:
-            if self.max_rounds is not None and rounds >= self.max_rounds:
-                normal_exit = False
-                return f"Agent stopped after {self.max_rounds} rounds without a final answer."
-            rounds += 1
+        try:
+            while True:
+                if self.max_rounds is not None and rounds >= self.max_rounds:
+                    normal_exit = False
+                    return f"Agent stopped after {self.max_rounds} rounds without a final answer."
+                rounds += 1
 
-            # ── Context Management: prepare before LLM call ──
-            messages[:] = self.context_manager.prepare(messages)
+                # ── Background: collect completed results ──
+                notifications = self.background_manager.collect()
+                for notification in notifications:
+                    messages.append({
+                        "role": "user",
+                        "content": notification,
+                    })
 
-            # If user rejected too many times, force-stop the loop.
-            if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                normal_exit = False
-                messages.append({
-                    "role": "user",
-                    "content": f"The user has rejected {consecutive_rejections} consecutive operations. "
-                               "Do NOT retry. Report what you have accomplished so far and stop.",
-                })
-                print(f"\033[31m✗ {consecutive_rejections} consecutive rejections, stopping agent loop.\033[0m")
-                consecutive_rejections = 0
-                response = self._call_llm(messages)
+                # ── Context Management: prepare before LLM call ──
+                messages[:] = self.context_manager.prepare(messages)
+
+                # If user rejected too many times, force-stop the loop.
+                if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
+                    normal_exit = False
+                    messages.append({
+                        "role": "user",
+                        "content": f"The user has rejected {consecutive_rejections} consecutive operations. "
+                                   "Do NOT retry. Report what you have accomplished so far and stop.",
+                    })
+                    print(f"\033[31m✗ {consecutive_rejections} consecutive rejections, stopping agent loop.\033[0m")
+                    consecutive_rejections = 0
+                    response = self._call_llm(messages)
+                    msg = response.choices[0].message
+                    messages.append(msg.model_dump())
+                    return msg.content or ""
+
+                try:
+                    response = self._call_llm(messages)
+                except Exception as e:
+                    if ("context" in str(e).lower() or "token" in str(e).lower()
+                            ) and reactive_retries < MAX_REACTIVE_RETRIES:
+                        print("\033[33m⚠ Context overflow, reactive compacting...\033[0m")
+                        messages[:] = self.context_manager.reactive_compact(messages)
+                        reactive_retries += 1
+                        continue
+                    raise
+                reactive_retries = 0
                 msg = response.choices[0].message
                 messages.append(msg.model_dump())
-                return msg.content or ""
 
-            try:
-                response = self._call_llm(messages)
-            except Exception as e:
-                if ("context" in str(e).lower() or "token" in str(e).lower()
-                        ) and reactive_retries < MAX_REACTIVE_RETRIES:
-                    print("\033[33m⚠ Context overflow, reactive compacting...\033[0m")
-                    messages[:] = self.context_manager.reactive_compact(messages)
-                    reactive_retries += 1
-                    continue
-                raise
-            reactive_retries = 0
-            msg = response.choices[0].message
-            messages.append(msg.model_dump())
+                if not msg.tool_calls:
+                    if normal_exit and self.memory_manager:
+                        self.memory_manager.extract_memories(messages)
+                        self.memory_manager.consolidate_memories()
+                    return msg.content or ""
 
-            if not msg.tool_calls:
-                if normal_exit and self.memory_manager:
-                    self.memory_manager.extract_memories(messages)
-                    self.memory_manager.consolidate_memories()
-                return msg.content or ""
+                for tc in msg.tool_calls:
+                    args = json.loads(tc.function.arguments)
+                    handler = self.handlers.get(tc.function.name)
 
-            for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments)
-                handler = self.handlers.get(tc.function.name)
+                    if handler is None:
+                        output = f"Error: Unknown tool '{tc.function.name}'"
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": output,
+                        })
+                        continue
 
-                if handler is None:
-                    output = f"Error: Unknown tool '{tc.function.name}'"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": output,
-                    })
-                    continue
+                    executed = self._execute_tool(handler, tc.id, tc.function.name, args, messages)
+                    if not executed:
+                        consecutive_rejections += 1
+                    else:
+                        consecutive_rejections = 0
 
-                executed = self._execute_tool(handler, tc.id, tc.function.name, args, messages)
-                if not executed:
-                    consecutive_rejections += 1
-                else:
-                    consecutive_rejections = 0
-
-            # ── Todo reminder (催更机制) ──
-            # Count once per round; using todo_write in this round resets it.
-            if any(tc.function.name == TODO_TOOL_NAME for tc in msg.tool_calls):
-                rounds_since_todo = 0
-            else:
-                rounds_since_todo += 1
-                if rounds_since_todo >= TODO_REMINDER_ROUNDS:
-                    # messages[-1] is this round's last tool message; rewrite its
-                    # content to inject the reminder (tool_call_id cannot be reused).
-                    messages[-1]["content"] += (
-                        f"\n\n<reminder>Call {TODO_TOOL_NAME} to update your todos.</reminder>\n"
-                        + self.todo_manager.render()
-                    )
+                # ── Todo reminder (催更机制) ──
+                # Count once per round; using todo_write in this round resets it.
+                if any(tc.function.name == TODO_TOOL_NAME for tc in msg.tool_calls):
                     rounds_since_todo = 0
+                else:
+                    rounds_since_todo += 1
+                    if rounds_since_todo >= TODO_REMINDER_ROUNDS:
+                        # messages[-1] is this round's last tool message; rewrite its
+                        # content to inject the reminder (tool_call_id cannot be reused).
+                        messages[-1]["content"] += (
+                            f"\n\n<reminder>Call {TODO_TOOL_NAME} to update your todos.</reminder>\n"
+                            + self.todo_manager.render()
+                        )
+                        rounds_since_todo = 0
+        finally:
+            self.background_manager.cancel_all()
 
     def handle_slash_command(self, query: str, history: list) -> bool:
         """Handle /context, /compact, /clear. Returns True if handled."""

@@ -54,9 +54,11 @@ def run_task(prompt: str) -> str:
     """Run a nested agent loop in a fresh context; return its final text."""
     from agent_loop import Agent          # lazy import to avoid circular dependency
     from tools import TodoManager, make_todo_handler
+    from background import BackgroundManager
 
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
     sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop
+    sub_bg = BackgroundManager()          # per-subagent background tasks
     sub_handlers = {k: v for k, v in TOOL_HANDLERS.items() if k != "todo_write"}
     sub_handlers["todo_write"] = make_todo_handler(sub_todo)
 
@@ -66,6 +68,7 @@ def run_task(prompt: str) -> str:
         handlers=sub_handlers,
         max_rounds=SUB_MAX_ROUNDS,
         todo_manager=sub_todo,
+        background_manager=sub_bg,
     )
     messages = [{"role": "user", "content": prompt}]
     result = sub.agent_loop(messages) or "(no summary)"

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from skill_loader import SkillLoader
+from background import _format_bash_result
 
 # ── Skill Loader (module-level singleton) ─────────────────────
 SKILL_LOADER = SkillLoader()
@@ -22,6 +23,13 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command to execute."},
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": (
+                            "Set to true to run this command in the background. "
+                            "Returns immediately with a task ID; results are delivered in a later turn."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },
@@ -199,25 +207,7 @@ def run_bash(command: str) -> str:
             command, shell=True, cwd=os.getcwd(),
             capture_output=True, text=True, errors="replace", timeout=120,
         )
-        out = (r.stdout + r.stderr).strip()
-        if not out:
-            return "(no output)"
-        # Layer 0: structured output for large results
-        if len(out) > 30000:
-            from context.artifact_store import ARTIFACT_STORE
-            aid = ARTIFACT_STORE.save(out, prefix="bash")
-            head = out[:2000]
-            tail = out[-500:] if len(out) > 2500 else ""
-            parts = [
-                f"exit_code: {r.returncode}",
-                f"output_size: {len(out)} chars (truncated)",
-                f"preview_head:\n{head}",
-            ]
-            if tail:
-                parts.append(f"preview_tail:\n...{tail}")
-            parts.append(f"full_output: artifact://{aid}")
-            return "\n".join(parts)
-        return out[:50000]
+        return _format_bash_result(r.stdout, r.stderr, r.returncode)
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
     except (FileNotFoundError, OSError) as e:
@@ -287,7 +277,7 @@ def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Error: Invalid regex: {e}"
-    root = Path(path)
+    root = Path(path).resolve()
     if not root.exists():
         return f"Error: Path not found: {path}"
     results = []
