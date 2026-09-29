@@ -386,3 +386,7 @@ Plan gate 是其中的核心状态机，实现 Teammate 的变更前审批：
 
 **4. 崩溃后不复活 Teammate**
 Teammate 的上下文（messages）在内存中，崩溃即丢失，“复活”得到的是一个失忆实例，继续执行只会引入不可预期的行为。恢复路径是轻量且确定的：崩溃时自动把持有的任务 release 回 pending（任务板是持久化的，不丢），上报 crash 消息，由 Leader 决定重新 spawn 还是自己接手。
+
+
+## MCP Server
+

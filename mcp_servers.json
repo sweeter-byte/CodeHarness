@@ -1,0 +1,36 @@
+{
+  "filesystem": {
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-filesystem",
+      "${WORKSPACE}"
+    ],
+    "connect_timeout": 60
+  },
+
+  "github": {
+    "transport": "stdio",
+    "enabled": false,
+    "command": "docker",
+    "args": [
+      "run",
+      "-i",
+      "--rm",
+      "-e",
+      "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "-e",
+      "GITHUB_READ_ONLY",
+      "-e",
+      "GITHUB_TOOLSETS",
+      "ghcr.io/github/github-mcp-server"
+    ],
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}",
+      "GITHUB_READ_ONLY": "true",
+      "GITHUB_TOOLSETS": "repos,issues"
+    },
+    "connect_timeout": 60
+  }
+}
