@@ -25,7 +25,8 @@ class Agent:
                  handlers: dict = None, max_rounds: int = None,
                  todo_manager: TodoManager = None,
                  memory_manager: MemoryManager = None,
-                 background_manager: BackgroundManager = None):
+                 background_manager: BackgroundManager = None,
+                 interactive: bool = True):
         self.client = OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -33,8 +34,18 @@ class Agent:
         self.model = os.environ["DEEPSEEK_MODEL_ID"]
 
         # ── Memory Management ──
-        self.memory_manager = memory_manager if memory_manager is not None \
-            else MemoryManager(client=self.client, model=self.model)
+        # memory_manager=False disables memory entirely (teammates): avoids
+        # concurrent .memory/ writes; the leader owns cross-session memory.
+        if memory_manager is False:
+            self.memory_manager = None
+        else:
+            self.memory_manager = memory_manager if memory_manager is not None \
+                else MemoryManager(client=self.client, model=self.model)
+
+        # ── Interaction mode ──
+        # interactive=False: permission 'ask' decisions are rejected instead
+        # of prompting input() — required for teammate daemon threads.
+        self.interactive = interactive
 
         base_system = system or (
             f"You are a coding agent at {os.getcwd()}. Use tools to solve tasks. Act, don't explain.\n"
@@ -42,6 +53,18 @@ class Agent:
             "then update item statuses as you work; keep exactly one item in_progress.\n"
             "Delegate self-contained subtasks (e.g. tracing a call chain across many files) "
             "to the 'task' tool so their intermediate steps don't pollute your context.\n\n"
+            "You are also the LEADER of an optional agent team. When parallel work would "
+            "clearly help (e.g. independent refactors across modules), first propose a "
+            "small team split (task directions, worktree needs, plan-approval needs) and "
+            "WAIT for the user's confirmation — do NOT call spawn_teammate before the user "
+            "confirms, and do NOT form a team for simple sequential tasks.\n"
+            "Team workflow: create tasks and dependencies (create_task/update_task) → "
+            "optionally create_worktree for conflicting tasks → spawn_teammate per "
+            "direction (require_plan for risky changes) → end your turn; results arrive "
+            "automatically as [Team events]. Coordinate: approve_plan for pending plans, "
+            "send_message for direct instructions, shutdown_teammate when done, then "
+            "remove_worktree and reset_tasks to clean up. Worktrees isolate git working "
+            "directories only — they are NOT a security sandbox.\n\n"
             f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
             "Use load_skill to read the full instructions when a skill applies."
         )
@@ -97,7 +120,7 @@ class Agent:
         Returns True if the tool actually executed, False if blocked/rejected.
         """
         # Reset the "ask user" flag before each tool call.
-        hooks.PENDING_USER_ASK = None
+        hooks.PENDING_USER_ASK.value = None
 
         # ── PreToolUse ──
         hook_result = trigger_hooks("PreToolUse", tool_name, args)
@@ -107,9 +130,26 @@ class Agent:
             output = hook_result
             print(f"\033[31m✗ BLOCKED {tool_name}: {output}\033[0m")
             executed = False
-        elif hooks.PENDING_USER_ASK is not None:
+        elif hooks.PENDING_USER_ASK.value is not None:
             # Permission hook flagged "ask" → prompt the user.
-            reason = hooks.PENDING_USER_ASK
+            reason = hooks.PENDING_USER_ASK.value
+            hooks.PENDING_USER_ASK.value = None
+            if not self.interactive:
+                # Non-interactive (teammate) mode: never touch the terminal.
+                # Dangerous operations are escalated to the leader via send_message.
+                output = (
+                    f"Error: This operation requires user approval, which is "
+                    f"not available for teammates - {reason}. Do NOT retry. "
+                    "Report the blocker to your leader via send_message, or "
+                    "adjust your approach to avoid this operation."
+                )
+                print(f"\033[31m  ✗ [non-interactive] rejected: {reason}\033[0m")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": output,
+                })
+                return False
             print(f"\033[33m  ⚠ {reason}\033[0m")
             answer = input("\033[33m  Allow? [y/N]: \033[0m").strip().lower()
             if answer != "y":
@@ -291,14 +331,19 @@ if __name__ == "__main__":
     from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
     from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
     from tools import TOOL_HANDLERS as TOOLS_HANDLERS_REF
+    from team import TEAM_TOOLS, TEAM_HANDLERS
+    from team import wakeup as team_wakeup
     import cron_scheduler
 
-    # Compose the parent agent's full tool set: base tools + delegation + task system + cron.
-    # subagent.py imported SUB_TOOLS before this append, so subagents never see these.
+    # Compose the parent agent's full tool set: base tools + delegation + task
+    # system + agent team + cron. team.teammate imported TEAMMATE_TOOLS from
+    # subagent BEFORE these appends, so teammates never see the tools below.
     TOOLS.append(TASK_TOOL)
     TOOLS.extend(TASK_TOOLS)
+    TOOLS.extend(TEAM_TOOLS)
     TOOL_HANDLERS.update(SUB_TASK_HANDLERS)
     TOOL_HANDLERS.update(TASK_SYS_HANDLERS)
+    TOOL_HANDLERS.update(TEAM_HANDLERS)
 
     agent = Agent()
     print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
@@ -306,6 +351,10 @@ if __name__ == "__main__":
     history = []
     # Start cron scheduler with agent and history references
     cron_scheduler.start(agent=agent, history=history)
+    # Team wakeup thread: delivers teammate events to the leader when idle.
+    # Shares agent_lock/UI_BUSY with the cron queue processor, so the two
+    # wakeup sources can never drive the leader concurrently.
+    team_wakeup.start(agent=agent, history=history)
 
     try:
         while True:
@@ -349,7 +398,8 @@ if __name__ == "__main__":
                 print(last["content"])
             print()
     finally:
-        # Stop cron scheduler
+        # Stop cron scheduler and team wakeup
+        team_wakeup.stop()
         cron_scheduler.stop()
 
     # Session ended 

@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 from pathlib import Path
 from permission import PermissionManager
 
@@ -37,7 +38,14 @@ SESSION_STATS = {
 }
 
 # Set by permission_hook when the decision is "ask"; read & cleared by the loop.
-PENDING_USER_ASK = None
+# Thread-local: the leader and teammate threads run tool calls concurrently;
+# a process-global flag would let one thread reset another's pending ask.
+class _PendingAskLocal(threading.local):
+    def __init__(self):
+        self.value = None
+
+
+PENDING_USER_ASK = _PendingAskLocal()
 
 _perm_manager = PermissionManager()
 
@@ -102,7 +110,6 @@ def permission_hook(tool_name: str, args: dict):
       allow → return None
     During cron turns, 'ask' decisions are rejected instead of prompting.
     """
-    global PENDING_USER_ASK
     decision, reason = _perm_manager.check(tool_name, args)
 
     if decision == "deny":
@@ -118,7 +125,7 @@ def permission_hook(tool_name: str, args: dict):
                 f"Error: Interactive approval not available during scheduled execution - {reason}. "
                 "Use non-interactive commands only."
             )
-        PENDING_USER_ASK = reason
+        PENDING_USER_ASK.value = reason
         return None
     return None
 

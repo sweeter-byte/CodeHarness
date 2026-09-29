@@ -8,6 +8,7 @@ Two-phase construction: create all nodes first, then add edges via update_task.
 import json
 import os
 import secrets
+import threading
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
@@ -31,6 +32,7 @@ class Task:
 	status: str                       # pending | in_progress | completed
 	owner: str | None
 	blockedBy: list[str] = field(default_factory=list)
+	worktree: str | None = None      # optional git worktree name (.worktrees/<name>)
 
 
 # ── TaskStore ──────────────────────────────────────────────────
@@ -41,6 +43,8 @@ class TaskStore:
 
 	def __init__(self, tasks_dir: str | Path = TASKS_DIR):
 		self.tasks_dir = Path(tasks_dir)
+		# Single-process, multi-thread team: claim/release/save must be atomic.
+		self._lock = threading.RLock()
 
 	# ── ID generation ──
 
@@ -65,12 +69,15 @@ class TaskStore:
 		return Task(**data)
 
 	def save(self, task: Task) -> None:
+		"""Atomic write: temp file + os.replace, safe under concurrent claims."""
 		self.tasks_dir.mkdir(parents=True, exist_ok=True)
 		path = self.tasks_dir / f"{task.id}.json"
-		path.write_text(
+		tmp = path.with_suffix(".json.tmp")
+		tmp.write_text(
 			json.dumps(asdict(task), indent=2, ensure_ascii=False),
 			encoding="utf-8",
 		)
+		os.replace(tmp, path)
 
 	def list_all(self) -> list[Task]:
 		if not self.tasks_dir.exists():
@@ -175,6 +182,75 @@ class TaskStore:
 				return False
 		return True
 
+	# ── Atomic claim / release (multi-agent) ──
+
+	def claim(self, task_id: str, owner: str,
+			  worktree_resolver=None) -> tuple[Task | None, str | None, str | None]:
+		"""Atomically claim a task. Returns (task, cwd, error).
+
+		Validation chain, all under the store lock:
+			pending & unclaimed → owner has no in-progress task → dependencies
+			ready → worktree (if bound) resolves to a valid directory.
+		Only then are owner + in_progress written — concurrent claimers that
+		saw the same snapshot lose atomically.
+		"""
+		with self._lock:
+			try:
+				task = self.load(task_id)
+			except FileNotFoundError as e:
+				return None, None, str(e)
+			if task.status != "pending" or task.owner is not None:
+				detail = f" (claimed by {task.owner})" if task.owner else ""
+				return None, None, f"Task {task_id} is {task.status}{detail}, cannot claim"
+			for t in self.list_all():
+				if t.owner == owner and t.status == "in_progress":
+					return None, None, (
+						f"Owner {owner} must complete its current task {t.id} first"
+					)
+			if not self.can_start(task_id):
+				incomplete = [
+					d for d in task.blockedBy
+					if self.load(d).status != "completed"
+				]
+				return None, None, f"Task {task_id} is blocked by: {incomplete}"
+			cwd = None
+			if task.worktree:
+				if worktree_resolver is None:
+					return None, None, (
+						f"Task {task_id} is bound to worktree '{task.worktree}'; "
+						"only teammates can claim worktree-bound tasks"
+					)
+				cwd, werr = worktree_resolver(task)
+				if werr:
+					return None, None, f"Cannot claim {task_id}: {werr}"
+			task.owner = owner
+			task.status = "in_progress"
+			self.save(task)
+			return task, cwd, None
+
+	def release(self, task_id: str) -> tuple[Task | None, str | None]:
+		"""Force-release an in_progress task back to pending (leader recovery)."""
+		with self._lock:
+			try:
+				task = self.load(task_id)
+			except FileNotFoundError as e:
+				return None, str(e)
+			if task.status != "in_progress":
+				return None, f"Task {task_id} is {task.status}; only in_progress tasks can be released"
+			task.owner = None
+			task.status = "pending"
+			self.save(task)
+			return task, None
+
+	def scan_ready_tasks(self) -> list[Task]:
+		"""Snapshot of unclaimed tasks whose dependencies are all completed.
+		Multiple idle teammates may see the same snapshot; claim() is the arbiter."""
+		with self._lock:
+			return [
+				t for t in self.list_all()
+				if t.status == "pending" and t.owner is None and self.can_start(t.id)
+			]
+
 
 TASKS = TaskStore(TASKS_DIR)
 
@@ -213,22 +289,18 @@ def run_can_start(task_id: str) -> str:
 
 
 def run_claim_task(task_id: str, owner: str = "agent") -> str:
-	try:
-		task = TASKS.load(task_id)
-	except FileNotFoundError as e:
-		return f"Error: {e}"
-	if task.status != "pending":
-		return f"Task {task_id} is {task.status}, cannot claim"
-	if not TASKS.can_start(task_id):
-		incomplete = [
-			d for d in task.blockedBy
-			if TASKS.load(d).status != "completed"
-		]
-		return f"Blocked by: {incomplete}"
-	task.owner = owner
-	task.status = "in_progress"
-	TASKS.save(task)
+	task, _cwd, error = TASKS.claim(task_id, owner)
+	if error:
+		return f"Error: {error}"
 	return f"Claimed {task_id} ({task.subject})"
+
+
+def run_release_task(task_id: str) -> str:
+	"""Leader recovery path: force an in_progress task back to pending."""
+	task, error = TASKS.release(task_id)
+	if error:
+		return f"Error: {error}"
+	return f"Released {task_id} ({task.subject}) back to pending"
 
 
 def run_complete_task(task_id: str, owner: str = "agent") -> str:
@@ -443,6 +515,26 @@ TASK_TOOLS = [
 	{
 		"type": "function",
 		"function": {
+			"name": "release_task",
+			"description": (
+				"Force-release an in_progress task back to pending (owner cleared). "
+			"Use for crash recovery or reassigning work. Leader only."
+			),
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"task_id": {
+						"type": "string",
+						"description": "ID of the task to release.",
+					},
+				},
+				"required": ["task_id"],
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
 			"name": "reset_tasks",
 			"description": (
 				"Clear all tasks. Only allowed when every task is completed. "
@@ -464,6 +556,7 @@ TASK_HANDLERS = {
 	"can_start":    run_can_start,
 	"claim_task":   run_claim_task,
 	"complete_task": run_complete_task,
+	"release_task": run_release_task,
 	"list_task":    run_list_task,
 	"get_task":     run_get_task,
 	"reset_tasks":  run_reset_tasks,

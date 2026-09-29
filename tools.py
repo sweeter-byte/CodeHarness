@@ -260,11 +260,24 @@ TOOLS = [
 ]
 
 # ── Tool Implementations ─────────────────────────────────────
+# Workspace tools accept an optional `cwd` keyword injected by the harness
+# (e.g. teammate assignment directories). It is NOT part of any tool schema,
+# so the model never supplies it. Threads must never os.chdir() — the
+# process cwd is shared across the leader and all teammates.
 
-def run_bash(command: str) -> str:
+
+def _resolve_path(path: str, cwd: str | None) -> Path:
+    """Resolve a possibly-relative path against the injected cwd."""
+    p = Path(path)
+    if cwd and not p.is_absolute():
+        p = Path(cwd) / p
+    return p
+
+
+def run_bash(command: str, cwd: str = None) -> str:
     try:
         r = subprocess.run(
-            command, shell=True, cwd=os.getcwd(),
+            command, shell=True, cwd=cwd or os.getcwd(),
             capture_output=True, text=True, errors="replace", timeout=120,
         )
         return _format_bash_result(r.stdout, r.stderr, r.returncode)
@@ -274,8 +287,9 @@ def run_bash(command: str) -> str:
         return f"Error: {e}"
 
 
-def run_read(path: str, start_line: int = None, end_line: int = None) -> str:
-    p = Path(path)
+def run_read(path: str, start_line: int = None, end_line: int = None,
+             cwd: str = None) -> str:
+    p = _resolve_path(path, cwd)
     if not p.exists():
         return f"Error: File not found: {path}"
     try:
@@ -293,9 +307,9 @@ def run_read(path: str, start_line: int = None, end_line: int = None) -> str:
     return "".join(numbered).rstrip() or "(empty file)"
 
 
-def run_write(path: str, content: str) -> str:
+def run_write(path: str, content: str, cwd: str = None) -> str:
     try:
-        p = Path(path)
+        p = _resolve_path(path, cwd)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
         return f"Written {len(content)} chars to {path}"
@@ -303,8 +317,8 @@ def run_write(path: str, content: str) -> str:
         return f"Error: {e}"
 
 
-def run_edit(path: str, old_text: str, new_text: str) -> str:
-    p = Path(path)
+def run_edit(path: str, old_text: str, new_text: str, cwd: str = None) -> str:
+    p = _resolve_path(path, cwd)
     if not p.exists():
         return f"Error: File not found: {path}"
     try:
@@ -321,23 +335,30 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
     return f"Edited {path}"
 
 
-def run_glob(pattern: str) -> str:
-    matches = sorted(Path(os.getcwd()).glob(pattern))
+def run_glob(pattern: str, cwd: str = None) -> str:
+    base = Path(cwd) if cwd else Path(os.getcwd())
+    matches = sorted(base.glob(pattern))
     if not matches:
         return "(no matches)"
-    lines = [str(m.relative_to(os.getcwd())) for m in matches[:200]]
+    lines = []
+    for m in matches[:200]:
+        try:
+            lines.append(str(m.relative_to(base)))
+        except ValueError:
+            lines.append(str(m))
     if len(matches) > 200:
         lines.append(f"... ({len(matches)} total matches, showing first 200. "
                      "Use a more specific pattern to narrow results.)")
     return "\n".join(lines)
 
 
-def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
+def run_grep(pattern: str, path: str = ".", file_pattern: str = None,
+             cwd: str = None) -> str:
     try:
         regex = re.compile(pattern)
     except re.error as e:
         return f"Error: Invalid regex: {e}"
-    root = Path(path).resolve()
+    root = _resolve_path(path, cwd)
     if not root.exists():
         return f"Error: Path not found: {path}"
     results = []
@@ -348,7 +369,10 @@ def run_grep(pattern: str, path: str = ".", file_pattern: str = None) -> str:
         try:
             for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
                 if regex.search(line):
-                    rel = f.relative_to(os.getcwd())
+                    try:
+                        rel = f.relative_to(Path(cwd) if cwd else os.getcwd())
+                    except ValueError:
+                        rel = f
                     results.append(f"{rel}:{i}: {line.strip()}")
         except (PermissionError, OSError):
             continue

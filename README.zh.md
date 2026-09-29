@@ -271,3 +271,118 @@ CLI 退出（EOFError / KeyboardInterrupt / "q"）
   ├── stop_event.set()  → 两个线程退出
   └── trigger_hooks("Stop", SESSION_STATS)
 ```
+
+
+## Agent Team
+
+新增一套 Agent Team 运行机制：由Leader（主线程 Agent 实例）负责理解需求、拆分任务、协调进度，多个持久Teammate（守护线程 + 独立 Agent 实例）并行处理子任务，通过 MessageBus通信，共享Task System任务板，可选Git Worktree隔离工作目录。
+
+```text
+team/
+├── __init__.py      # 包出口：TEAM_TOOLS / TEAM_HANDLERS / TEAMMATE_TOOLS / TeamManager
+│                    # import 时固化 TEAMMATE_TOOLS 过滤（早于 __main__ 的 TOOLS.extend）
+├── bus.py           # MessageBus：.mailboxes/*.jsonl 读写、Condition 唤醒、wait_for_messages
+├── protocol.py      # ProtocolState、request_id 生命周期、shutdown 握手与 plan 审批状态机
+├── manager.py       # TeamManager：Teammate 注册表、spawn/shutdown 编排、
+│                    # work_version 分配、teammate_assignments 维护
+├── teammate.py      # Teammate 线程运行时：WORK/IDLE 主循环、
+│                    # make_teammate_handlers 工厂（cwd 注入 + plan gate）、系统提示词
+├── wakeup.py        # Leader 唤醒线程：消费 lead 收件箱、协议状态匹配、
+│                    # 注入 [Team events]、驱动 agent_loop
+├── worktree.py      # Git worktree 创建 / 路径解析 / 安全清理（partial operation 处理）
+└── tools.py         # 工具 schema + handler 定义（对齐 task_system.py 惯例）
+```
+
+### MessageBus
+
+所有跨 Agent 通信的底层设施，对应 `bus.py`。每个成员拥有一个独立信箱：
+- 存储：`.mailboxes/{name}.jsonl`，一条消息一行，追加写天然并发友好，崩溃重启不丢消息
+- 地址：`LEADER = "lead"` 是保留名，Teammate 命名不可占用
+- 唤醒：`wait_for_messages` 基于 `threading.Condition` 阻塞等待，避免轮询烧 CPU
+
+消息结构：`{from, to, content, type, metadata}`。`type` 区分业务消息（`message`/`result`/`idle_notification`）与协议消息（`plan_approval_request`/`shutdown_request` 等），后者携带 `metadata.request_id` 参与协议状态机。
+
+### 协议状态机
+
+对应 `protocol.py`，解决异步通信中最容易出错的两类问题：**回复与请求的匹配**和**重复/过期回复**。
+
+每个协议动作（审批、关机）由 Leader 先创建 request（状态 `pending`），回复必须携带相同 `request_id`，经 `match_response` 校验类型与状态后才生效——乱序、重复、伪造的回复会被直接丢弃。请求只在 `pending` 时可被 `resolve` 一次，保证幂等。
+
+Plan gate 是其中的核心状态机，实现 Teammate 的变更前审批：
+```text
+ spawn(require_plan=True)      submit_plan            approve(approved)
+       │                            │                       │
+       ▼                            ▼                       ▼
+  [required] ────────► [pending] ────────► [approved] ──► 允许写操作
+       │                   │  ▲                            
+       │  写工具被 Block    │  │ reject                     
+       ▼                   ▼  │                            
+  （读工具放行）       [rejected] ──修改计划重新提交──► [pending]
+```
+关键点：gate 状态由 Leader 在审批时携带 `work_version` 写回，若 Teammate 在等待期间换了任务（版本已变），旧审批自动作废——防止陈旧批准穿透到新任务。
+
+### Worktree 隔离
+
+对应 `worktree.py`。当多个 Teammate 会修改同一批文件时，Leader 用 `create_worktree` 为冲突任务各建一个 `.worktrees/{name}` 的 Git worktree，并把 Task 的 `worktree` 字段绑定上去。
+- 认领约束：绑定 worktree 的任务仅允许 Teammate 认领（`claim` 需要 `worktree_resolver`），认领后工具的 `cwd` 自动锚定到 worktree 目录
+- 清理防呆：仍有 pending/in_progress 任务绑定时拒绝删除 worktree，避免误删未完成工作
+- 定位：worktree 只隔离 Git 工作目录，不是安全沙箱——权限层对 Teammate 依然生效
+
+### Teammate 运行时
+
+对应 `teammate.py` + `manager.py`。每个 Teammate = 守护线程 + 独立 `Agent` 实例，主循环为两阶段：
+```text
+ WORK 阶段（有任务）                    IDLE 阶段（无任务）
+ ┌────────────────────────┐          ┌──────────────────────────┐
+ │ agent_loop 执行任务      │          │ wait_for_messages 阻塞等待 │
+ │  ├─ 工具经 cwd wrapper   │  完成/上报  │  ├─ 新任务到达 → 自动认领    │
+ │  ├─ 写工具经 plan gate   │ ────────► │  ├─ 指令消息 → 作为下一轮输入│
+ │  └─ 忘调 complete_task  │  result + │  └─ shutdown_request →    │
+ │     则自动补完成          │  idle     │     回 ACK 后退出线程      │
+ └────────────────────────┘          └──────────────────────────┘
+```
+运行时内的几项自动补偿：认领任务即注入 `[Assigned task ...]` 系统消息；空闲时通过 `scan_ready_tasks` 抢占依赖就绪的任务（`claim` 的锁仲裁并发竞争）；回合结束未完成则自动补 `complete_task`，保证任务板状态一致。
+
+### Leader 唤醒线程
+
+对应 `wakeup.py`。Leader 结束回合后进入 `input()` 等用户输入，但 Teammate 的 result/审批请求需要有人接收——复用 Cron Scheduler 的 queue-processor 模式：
+- 唤醒线程每 0.5s 检查 lead 收件箱，无消息则休眠，不烧 CPU
+- 有消息时通过 `agent_lock`（与用户输入、定时任务共用）确认 Leader 空闲，再注入 `[Team events]` 并驱动 `agent_loop`
+- 避免了与用户终端输入的竞争——同一时刻只有一个驱动方在跑主循环
+
+### 协作流程
+
+一次典型的多 Agent 并行开发流程：
+```text
+ 用户
+  │ "重构 A、B 两个独立模块"
+  ▼
+ Leader（主线程）
+  │ 1. 建任务图: create_task ×2 (+update_task 依赖)
+  │ 2. 冲突任务: create_worktree 绑定
+  │ 3. spawn_teammate ×2（高风险任务 require_plan=True）
+  │ 4. 结束回合，等用户输入
+  ▼                                    ▲
+ Teammate-A          Teammate-B        │ wakeup 线程注入 [Team events]
+  │ claim task → work │ claim task → work
+  │ (cwd=worktree)    │ submit_plan ──────► Leader approve_plan
+  │                   │◄───────审批响应─────┘
+  │ 完成 → complete_task
+  │ result + idle ────────────────────► Leader 收到结果
+  │ (空闲后自动认领下一个 ready 任务)      │ 汇总/验收 → shutdown_teammate
+  ▼                                    │ → remove_worktree → reset_tasks
+```
+
+### 核心设计决策
+
+**1. Teammate = 守护线程 + 独立 Agent 实例（非多进程）**
+与项目现有 BackgroundManager / Cron 的并发模型保持一致：线程共享同一进程，无需 IPC 序列化，`TaskStore`、权限、Hook 均可直接复用；每个 Teammate 持有独立的 `Agent` 实例（独立的 messages/tools/handlers），上下文天然隔离。风险共担——单个 Teammate 崩溃由 `teammate_main` 的 try/except 兜住，不会波及 Leader。
+
+**2. Plan gate 放 per-agent handler wrapper（非全局 Hook）**
+现有 Hook 体系是进程级全局的，无法区分“这次写操作来自哪个 Agent”。因此 plan gate 实现为 `make_teammate_handlers` 工厂里的工具 wrapper：只拦截 Teammate 的写工具，Leader 与 SubAgent 完全不受影响，且结构性过滤在 import 时固化，不受后续 `__main__` 动态注册影响。
+
+**3. Teammate 禁用 MemoryManager**
+记忆提取会写 `.memory/`，多 Agent 并发写同一目录会产生覆盖与脏数据。收敛策略：Teammate 构造时传 `memory_manager=False` 彻底关闭，跨会话记忆职责完全归于 Leader——它既有全局视角，又天然串行。
+
+**4. 崩溃后不复活 Teammate**
+Teammate 的上下文（messages）在内存中，崩溃即丢失，“复活”得到的是一个失忆实例，继续执行只会引入不可预期的行为。恢复路径是轻量且确定的：崩溃时自动把持有的任务 release 回 pending（任务板是持久化的，不丢），上报 crash 消息，由 Leader 决定重新 spawn 还是自己接手。
