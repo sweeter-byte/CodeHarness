@@ -32,3 +32,6 @@ examples/
 
 # Memory storage (local persistent knowledge)
 .memory/
+
+# Task system (persistent task graph)
+.tasks/

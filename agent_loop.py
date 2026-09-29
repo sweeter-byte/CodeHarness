@@ -259,12 +259,15 @@ class Agent:
 
 
 if __name__ == "__main__":
-    from subagent import TASK_TOOL, TASK_HANDLERS
+    from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
+    from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
 
-    # Compose the parent agent's full tool set: base tools + delegation.
-    # subagent.py imported SUB_TOOLS before this append, so subagents never see 'task'.
+    # Compose the parent agent's full tool set: base tools + delegation + task system.
+    # subagent.py imported SUB_TOOLS before this append, so subagents never see these.
     TOOLS.append(TASK_TOOL)
-    TOOL_HANDLERS.update(TASK_HANDLERS)
+    TOOLS.extend(TASK_TOOLS)
+    TOOL_HANDLERS.update(SUB_TASK_HANDLERS)
+    TOOL_HANDLERS.update(TASK_SYS_HANDLERS)
 
     agent = Agent()
     print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")

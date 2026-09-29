@@ -1,5 +1,6 @@
 import os
 from tools import TOOLS, TOOL_HANDLERS, SKILL_LOADER
+from task_system import TASK_TOOLS
 
 SUB_SYSTEM = (
     f"You are a subagent at {os.getcwd()}, delegated a specific subtask by a parent agent. "
@@ -15,10 +16,15 @@ SUB_SYSTEM = (
 
 SUB_MAX_ROUNDS = 30
 
-# Inherit every base tool except 'task' — the structural one-level-delegation
-# guarantee. (SUB_TOOLS is built at import time, before __main__ appends TASK_TOOL
-# to TOOLS; the explicit filter is defensive against any import-order change.)
-SUB_TOOLS = [t for t in TOOLS if t["function"]["name"] != "task"]
+# Inherit every base tool except 'task' and task system tools — the structural
+# one-level-delegation guarantee. (SUB_TOOLS is built at import time, before
+# __main__ appends TASK_TOOL / TASK_TOOLS to TOOLS; the explicit filter is
+# defensive against any import-order change.)
+_TASK_SYS_NAMES = {t["function"]["name"] for t in TASK_TOOLS}
+SUB_TOOLS = [
+    t for t in TOOLS
+    if t["function"]["name"] != "task" and t["function"]["name"] not in _TASK_SYS_NAMES
+]
 
 TASK_TOOL = {
     "type": "function",

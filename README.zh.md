@@ -143,3 +143,33 @@ TokenCounter  .artifacts/       └── Checkpoint
 
 
 为了更好的测试上下文压缩等情况,可以在`.env`文件中调整上下文窗口大小.
+
+
+## Memory
+
+Memory由四个机制实现:
+- 记忆
+- 召回
+- 提取
+- 合并
+
+## Task System
+
+两阶段:
+- 先构建所有任务的节点
+- 再补充各节点之间可能存在的依赖关系
+
+需要保证构成的依赖关系图是一个DAG.此外,需要实现八个task tools:
+
+| 工具名             | 参数                                        | 返回               |
+| --------------- | ----------------------------------------- | ---------------- |
+| `create_task`   | `subject: str`, `description: str = ""`   | 生成的 ID + subject |
+| `update_task`   | `task_id: str`, `addBlockedBy: list[str]` | 更新后的依赖列表         |
+| `can_start`     | `task_id: str`                            | bool（是否所有前置已完成）  |
+| `claim_task`    | `task_id: str`, `owner: str = "agent"`    | 认领结果             |
+| `complete_task` | `task_id: str`, `owner: str = "agent"`    | 完成结果 + 被解锁的下游任务  |
+| `list_task`     | 无参数                                       | 表格摘要             |
+| `get_task`      | `task_id: str`                            | 完整 JSON          |
+| `reset_task`    | 无参数                                     |当前项目所有任务状态均为completed时,清空整个`.tasks/`目录   |
+
+注意到,任务编排只能由父Agent完成,子Agent禁用.
