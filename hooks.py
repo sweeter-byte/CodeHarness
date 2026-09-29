@@ -49,6 +49,16 @@ PENDING_USER_ASK = _PendingAskLocal()
 
 _perm_manager = PermissionManager()
 
+
+def configure_mcp_permissions(resolve, annotations_of=None):
+    """Inject MCP name-resolution into the shared PermissionManager.
+
+    Keeps permission.py decoupled from MCPManager: only two small callables
+    (resolve / annotations_of) are handed over, not the manager object itself.
+    Called once at startup after the MCP tool pool has been assembled.
+    """
+    _perm_manager.set_mcp_provider(resolve, annotations_of)
+
 # ── UserPromptSubmit Hook ─────────────────────────────────────
 
 def context_inject_hook(query: str):

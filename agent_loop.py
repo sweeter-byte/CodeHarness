@@ -328,16 +328,20 @@ class Agent:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+
     from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
     from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
     from tools import TOOL_HANDLERS as TOOLS_HANDLERS_REF
     from team import TEAM_TOOLS, TEAM_HANDLERS
     from team import wakeup as team_wakeup
     import cron_scheduler
+    from mcp_host import MCPManager, MCPConfigError, load_config, shutdown_runtime
 
     # Compose the parent agent's full tool set: base tools + delegation + task
     # system + agent team + cron. team.teammate imported TEAMMATE_TOOLS from
-    # subagent BEFORE these appends, so teammates never see the tools below.
+    # subagent BEFORE these appends, so teammates never see the tools below
+    # (this is also why MCP tools below are Leader-only in phase 1).
     TOOLS.append(TASK_TOOL)
     TOOLS.extend(TASK_TOOLS)
     TOOLS.extend(TEAM_TOOLS)
@@ -345,62 +349,94 @@ if __name__ == "__main__":
     TOOL_HANDLERS.update(TASK_SYS_HANDLERS)
     TOOL_HANDLERS.update(TEAM_HANDLERS)
 
-    agent = Agent()
-    print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
-
-    history = []
-    # Start cron scheduler with agent and history references
-    cron_scheduler.start(agent=agent, history=history)
-    # Team wakeup thread: delivers teammate events to the leader when idle.
-    # Shares agent_lock/UI_BUSY with the cron queue processor, so the two
-    # wakeup sources can never drive the leader concurrently.
-    team_wakeup.start(agent=agent, history=history)
-
+    # The outer try starts BEFORE connect_all so that even if assembly or
+    # Agent() init fails, any already-spawned MCP subprocess is reclaimed.
+    PROJECT_ROOT = Path(__file__).resolve().parent
+    os.environ.setdefault("WORKSPACE", str(PROJECT_ROOT))
+    mcp_manager = None
     try:
-        while True:
-            try:
-                query = input("\033[36m>> \033[0m")
-            except (EOFError, KeyboardInterrupt):
-                break
+        # ── MCP bootstrap: connect + assemble + merge BEFORE Agent() ──
+        # Agent() derives ContextBudget from the final tool schemas, so MCP
+        # tools must already be in TOOLS/TOOL_HANDLERS at construction time.
+        try:
+            mcp_configs = load_config(PROJECT_ROOT / "mcp_servers.json")
+        except MCPConfigError as e:
+            print(f"\033[33m[MCP] config load failed; continuing without MCP: {e}\033[0m")
+            mcp_configs = {}
 
-            # User has submitted input. Set UI_BUSY so the Queue Processor
-            # defers delivery while we process the message (prevents output
-            # interleaving on the shared terminal). Cleared once agent_lock
-            # is acquired, which blocks the Queue Processor via the lock.
-            cron_scheduler.UI_BUSY = True
+        mcp_manager = MCPManager(mcp_configs)
+        mcp_manager.connect_all()
+        for line in mcp_manager.status_lines():
+            print(f"\033[90m[MCP] {line}\033[0m")
 
-            if query.strip().lower() in ("q", "exit", ""):
-                cron_scheduler.UI_BUSY = False
-                break
+        mcp_tools, mcp_handlers = mcp_manager.assemble(set(TOOL_HANDLERS))
+        TOOLS.extend(mcp_tools)
+        TOOL_HANDLERS.update(mcp_handlers)
+        # Hand only the resolve/annotations callables to the permission layer.
+        hooks.configure_mcp_permissions(mcp_manager.resolve, mcp_manager.annotations_of)
 
-            # ── Slash Commands (intercepted before entering agent loop) ──
-            if agent.handle_slash_command(query, history):
-                cron_scheduler.UI_BUSY = False
-                continue
+        agent = Agent()
+        print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
 
-            trigger_hooks("UserPromptSubmit", query)
-            # Acquire agent_lock to prevent concurrent cron delivery.
-            # Use a loop with timeout to avoid indefinite blocking if the
-            # queue processor is running a scheduled delivery.
+        history = []
+        # Start cron scheduler with agent and history references
+        cron_scheduler.start(agent=agent, history=history)
+        # Team wakeup thread: delivers teammate events to the leader when idle.
+        # Shares agent_lock/UI_BUSY with the cron queue processor, so the two
+        # wakeup sources can never drive the leader concurrently.
+        team_wakeup.start(agent=agent, history=history)
+
+        try:
             while True:
-                if cron_scheduler.agent_lock.acquire(timeout=1):
+                try:
+                    query = input("\033[36m>> \033[0m")
+                except (EOFError, KeyboardInterrupt):
                     break
-                print("\033[33m[Wait] A scheduled task is running, waiting...\033[0m")
-            cron_scheduler.UI_BUSY = False
-            try:
-                history.append({"role": "user", "content": query})
-                agent.agent_loop(history)
-            finally:
-                cron_scheduler.agent_lock.release()
 
-            last = history[-1]
-            if last.get("content"):
-                print(last["content"])
-            print()
+                # User has submitted input. Set UI_BUSY so the Queue Processor
+                # defers delivery while we process the message (prevents output
+                # interleaving on the shared terminal). Cleared once agent_lock
+                # is acquired, which blocks the Queue Processor via the lock.
+                cron_scheduler.UI_BUSY = True
+
+                if query.strip().lower() in ("q", "exit", ""):
+                    cron_scheduler.UI_BUSY = False
+                    break
+
+                # ── Slash Commands (intercepted before entering agent loop) ──
+                if agent.handle_slash_command(query, history):
+                    cron_scheduler.UI_BUSY = False
+                    continue
+
+                trigger_hooks("UserPromptSubmit", query)
+                # Acquire agent_lock to prevent concurrent cron delivery.
+                # Use a loop with timeout to avoid indefinite blocking if the
+                # queue processor is running a scheduled delivery.
+                while True:
+                    if cron_scheduler.agent_lock.acquire(timeout=1):
+                        break
+                    print("\033[33m[Wait] A scheduled task is running, waiting...\033[0m")
+                cron_scheduler.UI_BUSY = False
+                try:
+                    history.append({"role": "user", "content": query})
+                    agent.agent_loop(history)
+                finally:
+                    cron_scheduler.agent_lock.release()
+
+                last = history[-1]
+                if last.get("content"):
+                    print(last["content"])
+                print()
+        finally:
+            # Stop cron scheduler and team wakeup
+            team_wakeup.stop()
+            cron_scheduler.stop()
+
+        # Session ended
+        trigger_hooks("Stop", SESSION_STATS)
     finally:
-        # Stop cron scheduler and team wakeup
-        team_wakeup.stop()
-        cron_scheduler.stop()
-
-    # Session ended 
-    trigger_hooks("Stop", SESSION_STATS)
+        # Close MCP adapters first, then the shared runtime (order matters:
+        # runtime.shutdown requires every adapter to be closed already).
+        if mcp_manager is not None:
+            mcp_manager.close_all()
+        shutdown_runtime()

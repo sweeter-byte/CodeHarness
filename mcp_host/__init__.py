@@ -1,9 +1,10 @@
 """Host-side MCP adapter layer for CodeHarness.
 
-Scope (this stage): single-server adaptation only — config, naming/schema
-conversion, shared sync runtime, and one ``MCPServerAdapter`` per server.
-Multi-server lifecycle (Manager), dynamic ``connect_mcp``, tool-pool
-assembly, and host permission policy are deliberately out of scope.
+Scope (this stage): config loading, naming/schema conversion, a shared sync
+runtime, one ``MCPServerAdapter`` per server, and an ``MCPManager`` that owns
+multi-server lifecycle + tool-pool assembly + dispatch. Still out of scope:
+runtime ``connect_mcp``, ``tools/list_changed`` subscription, automatic
+retry / reconnect-replay, and teammate/subagent MCP inheritance.
 """
 
 from .adapter import (
@@ -24,15 +25,19 @@ from .client import (
     normalize_call_result,
 )
 from .config import MCPConfigError, ServerConfig, load_config, validate_config
+from .manager import MCPAssemblyError, MCPManager, ServerStatus
 from .runtime import SyncMCPRuntime, get_runtime, shutdown_runtime
 
 __all__ = [
+    "MCPAssemblyError",
     "MCPCallResult",
     "MCPConfigError",
     "MCPConnectError",
     "MCPContentPart",
+    "MCPManager",
     "MCPServerAdapter",
     "ServerConfig",
+    "ServerStatus",
     "SyncMCPRuntime",
     "ToolDescriptor",
     "ToolNameCollisionError",

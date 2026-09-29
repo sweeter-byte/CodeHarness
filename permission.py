@@ -48,13 +48,59 @@ ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 # subagent's own tool calls, which go through the same permission gates.
 SAFE_TOOLS_AUTO = {"glob", "grep", "todo_write", "task", "load_skill", "cron_create", "cron_list", "cron_delete"}
 
+# ── MCP host-side policy ─────────────────────────────────────
+# The Harness is the FINAL authorization gate. Server-declared annotations
+# (readOnlyHint / destructiveHint / ...) are hints only and are never used to
+# grant access. Keyed by (server_name, raw_tool_name) — NOT by the prefixed
+# alias, because aliases past 64 chars are hash-shortened and cannot be
+# reliably reverse-parsed. Values: "allow" | "ask" | "deny". Anything not
+# listed defaults to "ask".
+MCP_TOOL_PREFIX = "mcp__"
+MCP_HOST_POLICY = {
+    # Filesystem MCP: reads auto-allowed, mutations require approval.
+    ("filesystem", "list_directory"): "allow",
+    ("filesystem", "list_directory_with_sizes"): "allow",
+    ("filesystem", "search_files"): "allow",
+    ("filesystem", "get_file_info"): "allow",
+    ("filesystem", "read_file"): "allow",
+    ("filesystem", "read_text_file_lines"): "allow",
+    ("filesystem", "read_multiple_files"): "allow",
+    ("filesystem", "write_file"): "ask",
+    ("filesystem", "create_directory"): "ask",
+    ("filesystem", "move_file"): "ask",
+    ("filesystem", "edit_file"): "ask",
+    ("filesystem", "delete_file"): "ask",
+    # GitHub MCP: reads auto-allowed, writes require approval.
+    ("github", "get_issue"): "allow",
+    ("github", "list_issues"): "allow",
+    ("github", "get_pull_request"): "allow",
+    ("github", "list_pull_requests"): "allow",
+    ("github", "get_file_contents"): "allow",
+    ("github", "search_code"): "allow",
+    ("github", "create_issue"): "ask",
+    ("github", "create_pull_request"): "ask",
+    ("github", "merge_pull_request"): "ask",
+}
+
 
 class PermissionManager:
-    def __init__(self, allowed_dirs: list[str] | None = None):
+    def __init__(self, allowed_dirs: list[str] | None = None,
+                 mcp_resolve=None, mcp_annotations_of=None):
         if allowed_dirs:
             self.allowed_dirs = [Path(d).resolve() for d in allowed_dirs]
         else:
             self.allowed_dirs = [Path(os.getcwd()).resolve()]
+        # Small injected callables (not the MCPManager itself) keep the
+        # permission layer decoupled from MCP lifecycle management:
+        #   mcp_resolve(prefixed)        -> (server, raw_tool) | None
+        #   mcp_annotations_of(prefixed) -> server hint object | None
+        self._mcp_resolve = mcp_resolve
+        self._mcp_annotations_of = mcp_annotations_of
+
+    def set_mcp_provider(self, resolve, annotations_of=None):
+        """Inject (or replace) the MCP name-resolver / annotation callables."""
+        self._mcp_resolve = resolve
+        self._mcp_annotations_of = annotations_of
 
     # ── Path helpers ──────────────────────────────────────────
 
@@ -111,6 +157,10 @@ class PermissionManager:
               - "deny":  forbidden, do NOT execute
               - "ask":   requires user approval before executing
         """
+        # MCP tools are gated by the host policy, not by path/bash rules.
+        if tool_name.startswith(MCP_TOOL_PREFIX):
+            return self._check_mcp(tool_name, args)
+
         # Read-only tools are always safe.
         if tool_name in SAFE_TOOLS_AUTO:
             return "allow", "Read-only tool, auto-allowed"
@@ -141,3 +191,40 @@ class PermissionManager:
             return "ask", f"File modification: {tool_name}"
 
         return "allow", "Passed all checks"
+
+    # ── MCP check ─────────────────────────────────────────────
+
+    def _mcp_annotation_hint(self, prefixed: str) -> str | None:
+        """Render server-declared hints for display only (never authorization)."""
+        if self._mcp_annotations_of is None:
+            return None
+        ann = self._mcp_annotations_of(prefixed)
+        if ann is None:
+            return None
+        hints = []
+        if getattr(ann, "read_only_hint", False):
+            hints.append("read-only")
+        if getattr(ann, "destructive_hint", False):
+            hints.append("destructive")
+        if getattr(ann, "idempotent_hint", False):
+            hints.append("idempotent")
+        if getattr(ann, "open_world_hint", False):
+            hints.append("open-world")
+        return ", ".join(hints) or None
+
+    def _check_mcp(self, prefixed: str, args: dict) -> tuple[str, str]:
+        pair = self._mcp_resolve(prefixed) if self._mcp_resolve else None
+        if pair is None:
+            # Unregistered / unresolvable external tool: default to approval.
+            return "ask", f"Unregistered MCP tool '{prefixed}'"
+
+        server, raw = pair
+        decision = MCP_HOST_POLICY.get(pair, "ask")
+        hint = self._mcp_annotation_hint(prefixed)
+        label = f"MCP tool {server}.{raw}" + (f" [{hint}]" if hint else "")
+
+        if decision == "deny":
+            return "deny", f"{label} is denied by host policy"
+        if decision == "ask":
+            return "ask", f"{label} requires approval"
+        return "allow", f"{label} allowed by host policy"
