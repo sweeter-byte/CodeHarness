@@ -34,7 +34,6 @@ class PersistentHandle:
 
     def __init__(self) -> None:
         self._future: Any = None       # concurrent.futures.Future for the task
-        self._cancel: Any = None       # portal cancel function (last resort)
         self._portal: Any = None
         self._value: Any = None
         self._error: BaseException | None = None
@@ -65,10 +64,10 @@ class PersistentHandle:
     def _start(self, portal: Any, factory: Callable[[], AbstractAsyncContextManager]) -> None:
         self._portal = portal
         # start_task blocks until task_status.started() — events exist on return.
-        # It yields (future, task_status_value); the portal separately hands
-        # back a cancel function used as the last-resort teardown path.
-        self._future, cancel = portal.start_task(self._run, factory)
-        self._cancel = cancel
+        # It returns (future, task_status_value); _run() calls started() with no
+        # value, so the second element is None and is deliberately discarded.
+        # There is NO cancel callable handed back — the future is the only handle.
+        self._future, _ = portal.start_task(self._run, factory)
 
     def result(self, timeout: float | None = None) -> Any:
         """Block until the context is entered; return its value or raise its error."""
@@ -99,8 +98,9 @@ class PersistentHandle:
 
         The background task owns the ``async with`` exit, so transport
         shutdown (for stdio: close stdin → wait → kill process tree) always
-        runs to completion. If teardown overruns ``timeout`` the task is
-        cancelled through the portal as a last resort.
+        runs to completion. If teardown overruns ``timeout`` the future is
+        cancelled as a best-effort last resort (a still-running task may ignore
+        cancellation, but this never raises like the old ``_cancel(...)`` did).
         """
         if self._portal is None or self._future is None:
             return
@@ -113,7 +113,8 @@ class PersistentHandle:
             self._portal.call(_signal_stop)
             done, _ = concurrent.futures.wait([self._future], timeout=timeout)
             if not done:
-                self._cancel(timeout)
+                # Graceful teardown overran the deadline — last-resort cancel.
+                self._future.cancel()
         except RuntimeError:
             pass  # portal already stopped; nothing we can do
         self._consume_future_exception()

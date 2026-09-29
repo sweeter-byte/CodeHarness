@@ -88,3 +88,24 @@ def test_close_waits_for_slow_teardown(runtime):
     start = time.monotonic()
     handle.close(timeout=5)
     assert time.monotonic() - start >= 0.25  # waited for teardown
+
+
+def test_close_timeout_falls_back_to_future_cancel(runtime):
+    # Regression: teardown that overruns the close deadline must fall back to
+    # future.cancel(). The old code called a None "_cancel" (the misread second
+    # element of start_task's return), raising
+    # "TypeError: 'NoneType' object is not callable" and masking the real error.
+    @asynccontextmanager
+    async def slow_cm():
+        try:
+            yield "v"
+        finally:
+            await anyio.sleep(1.0)  # __aexit__ overruns the timeout below
+
+    handle = runtime.spawn_persistent(slow_cm)
+    handle.result(timeout=5)                 # (a) normal enter
+    start = time.monotonic()
+    handle.close(timeout=0.2)                # (d)+(e) must NOT raise
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.9                     # returned via cancel fallback, not full teardown
+    handle.close(timeout=0.2)                # (c) still idempotent after the fallback
