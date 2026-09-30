@@ -5,7 +5,8 @@ Package layout (single-direction dependencies):
   protocol.py   ProtocolState / request_id lifecycle / plan gate constants
   worktree.py   git worktree create/resolve/remove (leader-only operations)
   teammate.py   TeammateState, handler factory, WORK/IDLE thread loop,
-                TEAMMATE_TOOLS (fixed at import time, before __main__ extends TOOLS)
+                TEAMMATE_TOOLS (built from the base tool registry, never
+                from the leader's pool)
   manager.py    TeamManager registry + spawn/shutdown orchestration
   wakeup.py     leader wakeup thread (event-driven [Team events] delivery)
   tools.py      leader tool schemas + handlers (TEAM_TOOLS / TEAM_HANDLERS)

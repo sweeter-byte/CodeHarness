@@ -1,6 +1,6 @@
 import os
-from tools import TOOLS, TOOL_HANDLERS, SKILL_LOADER
-from task_system import TASK_TOOLS
+from codeharness.tools import build_base_registry, TodoManager, make_todo_handler
+from codeharness.skills.tools import SKILL_LOADER
 
 SUB_SYSTEM = (
     f"You are a subagent at {os.getcwd()}, delegated a specific subtask by a parent agent. "
@@ -16,15 +16,14 @@ SUB_SYSTEM = (
 
 SUB_MAX_ROUNDS = 30
 
-# Inherit every base tool except 'task' and task system tools — the structural
-# one-level-delegation guarantee. (SUB_TOOLS is built at import time, before
-# __main__ appends TASK_TOOL / TASK_TOOLS to TOOLS; the explicit filter is
-# defensive against any import-order change.)
-_TASK_SYS_NAMES = {t["function"]["name"] for t in TASK_TOOLS}
-SUB_TOOLS = [
-    t for t in TOOLS
-    if t["function"]["name"] != "task" and t["function"]["name"] not in _TASK_SYS_NAMES
-]
+# The subagent tool set is exactly the base tool set, built explicitly from
+# its own registry — never a filtered view of the leader's pool. 'task'
+# (second-level delegation), task system tools, team tools and MCP tools are
+# Leader-only by construction: they are registered in agent_loop's __main__
+# registry, not in the base registry.
+_BASE_REGISTRY = build_base_registry()
+SUB_TOOLS = _BASE_REGISTRY.schemas
+SUB_HANDLERS = _BASE_REGISTRY.handlers
 
 TASK_TOOL = {
     "type": "function",
@@ -53,13 +52,12 @@ TASK_TOOL = {
 def run_task(prompt: str) -> str:
     """Run a nested agent loop in a fresh context; return its final text."""
     from agent_loop import Agent          # lazy import to avoid circular dependency
-    from tools import TodoManager, make_todo_handler
     from codeharness.background import BackgroundManager
 
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
     sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop
     sub_bg = BackgroundManager()          # per-subagent background tasks
-    sub_handlers = {k: v for k, v in TOOL_HANDLERS.items() if k != "todo_write"}
+    sub_handlers = dict(SUB_HANDLERS)
     sub_handlers["todo_write"] = make_todo_handler(sub_todo)
 
     sub = Agent(

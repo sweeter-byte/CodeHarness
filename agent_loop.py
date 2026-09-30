@@ -2,7 +2,9 @@ import json
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from tools import TOOLS, TOOL_HANDLERS, TODO, TodoManager, SKILL_LOADER
+from codeharness.tools import build_base_registry, TodoManager
+from codeharness.tools.todo import TODO as DEFAULT_TODO
+from codeharness.skills.tools import SKILL_LOADER
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
 from codeharness.context.budget import ContextBudget
@@ -18,6 +20,13 @@ TODO_TOOL_NAME = "todo_write"
 TODO_REMINDER_ROUNDS = 3
 MAX_REACTIVE_RETRIES = 1
 MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "1048576"))
+
+# Default tool set for an Agent constructed without explicit tools/handlers
+# (the leader CLI path passes its fully-assembled registry snapshot instead).
+# These are per-module snapshots, never a shared mutable pool.
+_BASE_REGISTRY = build_base_registry()
+DEFAULT_TOOLS = _BASE_REGISTRY.schemas
+DEFAULT_HANDLERS = _BASE_REGISTRY.handlers
 
 
 class Agent:
@@ -71,10 +80,10 @@ class Agent:
 
         memory_block = self.memory_manager.load_relevant([])
         self.system = base_system + memory_block if memory_block else base_system
-        self.tools = tools if tools is not None else TOOLS
-        self.handlers = handlers if handlers is not None else TOOL_HANDLERS
+        self.tools = tools if tools is not None else list(DEFAULT_TOOLS)
+        self.handlers = handlers if handlers is not None else dict(DEFAULT_HANDLERS)
         self.max_rounds = max_rounds
-        self.todo_manager = todo_manager if todo_manager is not None else TODO
+        self.todo_manager = todo_manager if todo_manager is not None else DEFAULT_TODO
         self.background_manager = background_manager if background_manager is not None \
             else BACKGROUND
 
@@ -332,22 +341,20 @@ if __name__ == "__main__":
 
     from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
     from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
-    from tools import TOOL_HANDLERS as TOOLS_HANDLERS_REF
     from team import TEAM_TOOLS, TEAM_HANDLERS
     from team import wakeup as team_wakeup
     import cron_scheduler
     from codeharness.mcp import MCPManager, MCPConfigError, load_config, shutdown_runtime
 
-    # Compose the parent agent's full tool set: base tools + delegation + task
-    # system + agent team + cron. team.teammate imported TEAMMATE_TOOLS from
-    # subagent BEFORE these appends, so teammates never see the tools below
-    # (this is also why MCP tools below are Leader-only in phase 1).
-    TOOLS.append(TASK_TOOL)
-    TOOLS.extend(TASK_TOOLS)
-    TOOLS.extend(TEAM_TOOLS)
-    TOOL_HANDLERS.update(SUB_TASK_HANDLERS)
-    TOOL_HANDLERS.update(TASK_SYS_HANDLERS)
-    TOOL_HANDLERS.update(TEAM_HANDLERS)
+    # Compose the leader's full tool set in one registry: base tools +
+    # delegation + task system + agent team. Subagents and teammates build
+    # their own tool sets from build_base_registry() directly, so tools
+    # registered here are Leader-only by construction (no import-order
+    # dependency). MCP tools are appended after connect, before Agent().
+    registry = build_base_registry()
+    registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
+    registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
+    registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
 
     # The outer try starts BEFORE connect_all so that even if assembly or
     # Agent() init fails, any already-spawned MCP subprocess is reclaimed.
@@ -357,7 +364,7 @@ if __name__ == "__main__":
     try:
         # ── MCP bootstrap: connect + assemble + merge BEFORE Agent() ──
         # Agent() derives ContextBudget from the final tool schemas, so MCP
-        # tools must already be in TOOLS/TOOL_HANDLERS at construction time.
+        # tools must already be in the registry at construction time.
         try:
             mcp_configs = load_config(PROJECT_ROOT / "mcp_servers.json")
         except MCPConfigError as e:
@@ -369,13 +376,16 @@ if __name__ == "__main__":
         for line in mcp_manager.status_lines():
             print(f"\033[90m[MCP] {line}\033[0m")
 
-        mcp_tools, mcp_handlers = mcp_manager.assemble(set(TOOL_HANDLERS))
-        TOOLS.extend(mcp_tools)
-        TOOL_HANDLERS.update(mcp_handlers)
+        mcp_tools, mcp_handlers = mcp_manager.assemble(registry.names())
+        registry.extend(mcp_tools, mcp_handlers)
         # Hand only the resolve/annotations callables to the permission layer.
         hooks.configure_mcp_permissions(mcp_manager.resolve, mcp_manager.annotations_of)
 
-        agent = Agent()
+        agent = Agent(
+            tools=registry.schemas,
+            handlers=registry.handlers,
+            todo_manager=DEFAULT_TODO,
+        )
         print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
 
         history = []

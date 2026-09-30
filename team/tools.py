@@ -1,9 +1,9 @@
 """Leader-side team tools: lifecycle, worktree management, messaging, approval.
 
 Schema + handler pairs follow the task_system.py convention; agent_loop's
-__main__ extends TOOLS / TOOL_HANDLERS with TEAM_TOOLS / TEAM_HANDLERS.
-Teammates never see these — their tool set is fixed at import time in
-teammate.py, before __main__ appends anything.
+__main__ registers TEAM_TOOLS / TEAM_HANDLERS into the leader's
+ToolRegistry. Teammates never see these — their tool set is built from the
+base tool registry in teammate.py.
 """
 
 from team.bus import BUS, LEADER

@@ -22,8 +22,9 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-from task_system import TASKS
-from tools import TodoManager, make_todo_handler, TOOL_HANDLERS, SKILL_LOADER
+from task_system import TASKS, TASK_TOOLS, TASK_HANDLERS
+from codeharness.tools import build_base_registry, TodoManager, make_todo_handler
+from codeharness.skills.tools import SKILL_LOADER
 from team.bus import BUS, LEADER
 from team import protocol
 from team.protocol import (
@@ -39,10 +40,7 @@ TEAMMATE_MAX_ROUNDS = 60
 WORKSPACE_TOOLS = {"bash", "read_file", "write_file", "edit_file", "glob", "grep"}
 WRITE_TOOLS = {"bash", "write_file", "edit_file"}
 
-# ── Teammate tool set (built at import time, before __main__ extends TOOLS) ──
-
-from subagent import SUB_TOOLS                       # noqa: E402
-from task_system import TASK_TOOLS                    # noqa: E402
+# ── Teammate tool set (built explicitly from the base registry) ──
 
 # Task-board tools a teammate may use; graph mutation (create/update/
 # release/reset) stays leader-only.
@@ -100,25 +98,28 @@ SUBMIT_PLAN_SCHEMA = {
 	},
 }
 
-TEAMMATE_TOOLS = (
-	[t for t in SUB_TOOLS
-	 if t["function"]["name"] not in _EXCLUDED_NAMES]
-	+ [t for t in TASK_TOOLS
-	   if t["function"]["name"] in _TASK_BOARD_NAMES]
-	+ [SEND_MESSAGE_SCHEMA, SUBMIT_PLAN_SCHEMA]
+# The teammate tool set is built from its own base registry: base tools
+# minus cron, plus the allowed task-board tools. It is never a filtered
+# view of the leader's pool, so 'task', task-graph mutation, team lifecycle
+# and MCP tools are excluded by construction — no import-order dependency.
+# send_message / submit_plan are appended as raw schemas: their handlers
+# are bound per teammate in make_teammate_handlers().
+_TEAMMATE_REGISTRY = build_base_registry()
+for _name in _EXCLUDED_NAMES:
+	_TEAMMATE_REGISTRY._schemas.pop(_name, None)
+	_TEAMMATE_REGISTRY._handlers.pop(_name, None)
+_TEAMMATE_REGISTRY.extend(
+	[t for t in TASK_TOOLS if t["function"]["name"] in _TASK_BOARD_NAMES],
+	{name: handler for name, handler in TASK_HANDLERS.items()
+	 if name in _TASK_BOARD_NAMES},
 )
 
-# Handlers are composed at spawn time — AFTER __main__ has extended
-# TOOL_HANDLERS with delegation/task-system/team/cron handlers. Filter to
-# exactly the teammate's schema set: one-level delegation ('task'), graph
-# mutation, team lifecycle and cron scheduling stay leader-only.
-_LEADER_ONLY_HANDLERS = (
-	{"task", "todo_write"}
-	| _EXCLUDED_NAMES
-	| {"create_task", "update_task", "release_task", "reset_tasks"}
-	| {"spawn_teammate", "shutdown_teammate", "list_teammates",
-	   "create_worktree", "remove_worktree", "approve_plan"}
-)
+TEAMMATE_TOOLS = _TEAMMATE_REGISTRY.schemas + [SEND_MESSAGE_SCHEMA, SUBMIT_PLAN_SCHEMA]
+
+# Teammate handlers = base handlers (minus cron) + task-board handlers;
+# todo_write / claim_task / complete_task / send_message / submit_plan are
+# bound per teammate in make_teammate_handlers().
+_TEAMMATE_BASE_HANDLERS = _TEAMMATE_REGISTRY.handlers
 
 
 @dataclass
@@ -185,10 +186,8 @@ def make_teammate_handlers(state: TeammateState) -> dict:
 	teammate's own TodoManager, same pattern as subagents.
 	"""
 	from team.worktree import resolve_worktree_cwd
-	from task_system import run_complete_task
 
-	handlers = {k: v for k, v in TOOL_HANDLERS.items()
-				if k not in _LEADER_ONLY_HANDLERS}
+	handlers = dict(_TEAMMATE_BASE_HANDLERS)
 	handlers["todo_write"] = make_todo_handler(state.todo)
 
 	def _guard(tool_name: str, handler):
@@ -225,7 +224,7 @@ def make_teammate_handlers(state: TeammateState) -> dict:
 	def _complete(task_id: str, owner: str = None) -> str:
 		# Assignment is NOT cleared here: later tools in this round may
 		# still need the working directory. Unbinding happens at round end.
-		return run_complete_task(task_id, owner=state.name)
+		return TASK_HANDLERS["complete_task"](task_id, owner=state.name)
 
 	def _send(to: str, content: str) -> str:
 		from team.manager import TEAM

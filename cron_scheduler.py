@@ -379,3 +379,116 @@ def set_history_ref(history: list) -> None:
 	"""Update the history reference (called when history is created/reset)."""
 	global _history_ref
 	_history_ref = history
+
+
+# ── Cron Tools (schema + handler, owned by the cron module) ──
+# Migrated from the legacy root tools.py (Phase 2); the scheduling
+# mechanism itself is unchanged. When the scheduler moves into
+# codeharness/ in a later phase, these tools move with it.
+
+
+def run_cron_create(cron: str, prompt: str, recurring: bool = True, durable: bool = True) -> str:
+	store = get_store()
+	if store is None:
+		return "Error: Cron scheduler not initialized"
+	err = validate_cron(cron)
+	if err:
+		return f"Error: Invalid cron expression - {err}"
+	if not prompt or not prompt.strip():
+		return "Error: Prompt cannot be empty"
+	job = store.add(cron, prompt.strip(), recurring, durable)
+	return f"Created {job.id}: cron='{job.cron}', recurring={job.recurring}, durable={job.durable}"
+
+
+def run_cron_list() -> str:
+	store = get_store()
+	if store is None:
+		return "(cron scheduler not initialized)"
+	jobs = store.list_all()
+	if not jobs:
+		return "(no scheduled tasks)"
+	lines = []
+	for j in jobs:
+		rec = "recurring" if j.recurring else "one-shot"
+		dur = "durable" if j.durable else "memory"
+		lines.append(f"{j.id} | {j.cron:<15} | {rec:<10} | {dur:<8} | {j.prompt}")
+	return "\n".join(lines)
+
+
+def run_cron_delete(job_id: str) -> str:
+	store = get_store()
+	if store is None:
+		return "Error: Cron scheduler not initialized"
+	if store.remove(job_id):
+		return f"Deleted {job_id}"
+	return f"Error: Job not found: {job_id}"
+
+
+CRON_TOOLS = [
+	{
+		"type": "function",
+		"function": {
+			"name": "cron_create",
+			"description": (
+				"Schedule a recurring or one-shot task. The prompt will be delivered "
+				"to the agent at the specified time. Use cron expressions to define timing."
+			),
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"cron": {
+						"type": "string",
+						"description": "5-field cron expression (minute hour day month weekday).",
+					},
+					"prompt": {
+						"type": "string",
+						"description": "Task description delivered to the agent when triggered.",
+					},
+					"recurring": {
+						"type": "boolean",
+						"description": "True for recurring, False for one-shot. Default True.",
+					},
+					"durable": {
+						"type": "boolean",
+						"description": "True to persist across restarts. Default True.",
+					},
+				},
+				"required": ["cron", "prompt"],
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
+			"name": "cron_list",
+			"description": "Show all scheduled tasks: ID, cron expression, prompt, recurring status.",
+			"parameters": {
+				"type": "object",
+				"properties": {},
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
+			"name": "cron_delete",
+			"description": "Remove a scheduled task by its ID.",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"job_id": {
+						"type": "string",
+						"description": "ID of the scheduled job to remove.",
+					},
+				},
+				"required": ["job_id"],
+			},
+		},
+	},
+]
+
+CRON_HANDLERS = {
+	"cron_create": run_cron_create,
+	"cron_list":   run_cron_list,
+	"cron_delete": run_cron_delete,
+}
