@@ -37,7 +37,7 @@ os.chdir(TMP)
 
 # Stub the openai SDK when it is not installed in this environment — the
 # FakeAgent below never talks to an LLM, and Agent's real constructor is
-# never reached (agent_loop.Agent is replaced before any spawn).
+# never reached (core.agent.Agent is replaced before any spawn).
 try:
 	import openai  # noqa: F401
 except ImportError:
@@ -49,7 +49,7 @@ except ImportError:
 	_openai_stub.OpenAI = _OpenAIStub
 	sys.modules["openai"] = _openai_stub
 
-import agent_loop  # noqa: E402
+from codeharness.core import agent as agent_module  # noqa: E402
 
 # ── FakeAgent: drives the teammate's handlers per a scripted action list ──
 
@@ -72,7 +72,7 @@ class FakeAgent:
 		return action(self, messages)
 
 
-agent_loop.Agent = FakeAgent
+agent_module.Agent = FakeAgent
 
 
 def extract_task_id(messages):

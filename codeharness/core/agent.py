@@ -1,10 +1,8 @@
 import json
 import os
-from dotenv import load_dotenv
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
 from codeharness.tools.todo import TODO as DEFAULT_TODO
-from codeharness.skills.tools import SKILL_LOADER
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
 from codeharness.context.budget import ContextBudget
@@ -12,17 +10,17 @@ from codeharness.context.token_counter import TokenCounter
 from codeharness.context.manager import ContextManager
 from codeharness.memory import MemoryManager
 from codeharness.background import BACKGROUND, BackgroundManager, should_run_background
+from codeharness.core.prompt import build_default_system_prompt
+from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
 
-load_dotenv(override=True)
 
 MAX_CONSECUTIVE_REJECTIONS = 3
 TODO_TOOL_NAME = "todo_write"
 TODO_REMINDER_ROUNDS = 3
 MAX_REACTIVE_RETRIES = 1
-MODEL_CONTEXT_WINDOW = int(os.environ.get("MODEL_CONTEXT_WINDOW", "1048576"))
 
 # Default tool set for an Agent constructed without explicit tools/handlers
-# (the leader CLI path passes its fully-assembled registry snapshot instead).
+# (the leader Runtime path passes its fully-assembled registry snapshot instead).
 # These are per-module snapshots, never a shared mutable pool.
 _BASE_REGISTRY = build_base_registry()
 DEFAULT_TOOLS = _BASE_REGISTRY.schemas
@@ -35,12 +33,23 @@ class Agent:
                  todo_manager: TodoManager = None,
                  memory_manager: MemoryManager = None,
                  background_manager: BackgroundManager = None,
-                 interactive: bool = True):
-        self.client = OpenAI(
+                 interactive: bool = True,
+                 client=None,
+                 model: str = None,
+                 model_context_window: int = None,
+                 workspace: str = None):
+        self.client = client if client is not None else OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
         )
-        self.model = os.environ["DEEPSEEK_MODEL_ID"]
+        self.model = model if model is not None else os.environ["DEEPSEEK_MODEL_ID"]
+        self.model_context_window = (
+            model_context_window
+            if model_context_window is not None
+            else int(os.environ.get(
+                "MODEL_CONTEXT_WINDOW", str(DEFAULT_MODEL_CONTEXT_WINDOW)
+            ))
+        )
 
         # ── Memory Management ──
         # memory_manager=False disables memory entirely (teammates): avoids
@@ -56,29 +65,9 @@ class Agent:
         # of prompting input() — required for teammate daemon threads.
         self.interactive = interactive
 
-        base_system = system or (
-            f"You are a coding agent at {os.getcwd()}. Use tools to solve tasks. Act, don't explain.\n"
-            f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
-            "then update item statuses as you work; keep exactly one item in_progress.\n"
-            "Delegate self-contained subtasks (e.g. tracing a call chain across many files) "
-            "to the 'task' tool so their intermediate steps don't pollute your context.\n\n"
-            "You are also the LEADER of an optional agent team. When parallel work would "
-            "clearly help (e.g. independent refactors across modules), first propose a "
-            "small team split (task directions, worktree needs, plan-approval needs) and "
-            "WAIT for the user's confirmation — do NOT call spawn_teammate before the user "
-            "confirms, and do NOT form a team for simple sequential tasks.\n"
-            "Team workflow: create tasks and dependencies (create_task/update_task) → "
-            "optionally create_worktree for conflicting tasks → spawn_teammate per "
-            "direction (require_plan for risky changes) → end your turn; results arrive "
-            "automatically as [Team events]. Coordinate: approve_plan for pending plans, "
-            "send_message for direct instructions, shutdown_teammate when done, then "
-            "remove_worktree and reset_tasks to clean up. Worktrees isolate git working "
-            "directories only — they are NOT a security sandbox.\n\n"
-            f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
-            "Use load_skill to read the full instructions when a skill applies."
-        )
+        base_system = system or build_default_system_prompt(workspace or os.getcwd())
 
-        memory_block = self.memory_manager.load_relevant([])
+        memory_block = self.memory_manager.load_relevant([]) if self.memory_manager else ""
         self.system = base_system + memory_block if memory_block else base_system
         self.tools = tools if tools is not None else list(DEFAULT_TOOLS)
         self.handlers = handlers if handlers is not None else dict(DEFAULT_HANDLERS)
@@ -92,7 +81,7 @@ class Agent:
         _fixed = self.token_counter.estimate_tokens(self.system) + \
                  self.token_counter.estimate_tokens(str(self.tools))
         self.context_budget = ContextBudget.from_model_config(
-            model_window=MODEL_CONTEXT_WINDOW,
+            model_window=self.model_context_window,
             max_output_tokens=8000,
             fixed_context_tokens=_fixed,
         )
@@ -316,137 +305,3 @@ class Agent:
         finally:
             self.background_manager.cancel_all()
 
-    def handle_slash_command(self, query: str, history: list) -> bool:
-        """Handle /context, /compact, /clear. Returns True if handled."""
-        cmd = query.strip().lower()
-        if not cmd.startswith("/"):
-            return False
-        if cmd == "/context":
-            print(self.context_manager.get_observability_report(history))
-        elif cmd == "/compact":
-            history[:] = self.context_manager.compact_history(history)
-            print("\033[33m✓ Context compacted.\033[0m")
-        elif cmd == "/clear":
-            history.clear()
-            self.context_manager.set_active_request("")
-            print("\033[33m✓ Context cleared.\033[0m")
-        else:
-            print(f"Unknown command: {cmd}")
-            print("Available: /context, /compact, /clear")
-        return True
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-
-    from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
-    from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
-    from team import TEAM_TOOLS, TEAM_HANDLERS
-    from team import wakeup as team_wakeup
-    import cron_scheduler
-    from codeharness.mcp import MCPManager, MCPConfigError, load_config, shutdown_runtime
-
-    # Compose the leader's full tool set in one registry: base tools +
-    # delegation + task system + agent team. Subagents and teammates build
-    # their own tool sets from build_base_registry() directly, so tools
-    # registered here are Leader-only by construction (no import-order
-    # dependency). MCP tools are appended after connect, before Agent().
-    registry = build_base_registry()
-    registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
-    registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
-    registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
-
-    # The outer try starts BEFORE connect_all so that even if assembly or
-    # Agent() init fails, any already-spawned MCP subprocess is reclaimed.
-    PROJECT_ROOT = Path(__file__).resolve().parent
-    os.environ.setdefault("WORKSPACE", str(PROJECT_ROOT))
-    mcp_manager = None
-    try:
-        # ── MCP bootstrap: connect + assemble + merge BEFORE Agent() ──
-        # Agent() derives ContextBudget from the final tool schemas, so MCP
-        # tools must already be in the registry at construction time.
-        try:
-            mcp_configs = load_config(PROJECT_ROOT / "mcp_servers.json")
-        except MCPConfigError as e:
-            print(f"\033[33m[MCP] config load failed; continuing without MCP: {e}\033[0m")
-            mcp_configs = {}
-
-        mcp_manager = MCPManager(mcp_configs)
-        mcp_manager.connect_all()
-        for line in mcp_manager.status_lines():
-            print(f"\033[90m[MCP] {line}\033[0m")
-
-        mcp_tools, mcp_handlers = mcp_manager.assemble(registry.names())
-        registry.extend(mcp_tools, mcp_handlers)
-        # Hand only the resolve/annotations callables to the permission layer.
-        hooks.configure_mcp_permissions(mcp_manager.resolve, mcp_manager.annotations_of)
-
-        agent = Agent(
-            tools=registry.schemas,
-            handlers=registry.handlers,
-            todo_manager=DEFAULT_TODO,
-        )
-        print("Agent Loop (type q to quit, /context /compact /clear for context mgmt)\n")
-
-        history = []
-        # Start cron scheduler with agent and history references
-        cron_scheduler.start(agent=agent, history=history)
-        # Team wakeup thread: delivers teammate events to the leader when idle.
-        # Shares agent_lock/UI_BUSY with the cron queue processor, so the two
-        # wakeup sources can never drive the leader concurrently.
-        team_wakeup.start(agent=agent, history=history)
-
-        try:
-            while True:
-                try:
-                    query = input("\033[36m>> \033[0m")
-                except (EOFError, KeyboardInterrupt):
-                    break
-
-                # User has submitted input. Set UI_BUSY so the Queue Processor
-                # defers delivery while we process the message (prevents output
-                # interleaving on the shared terminal). Cleared once agent_lock
-                # is acquired, which blocks the Queue Processor via the lock.
-                cron_scheduler.UI_BUSY = True
-
-                if query.strip().lower() in ("q", "exit", ""):
-                    cron_scheduler.UI_BUSY = False
-                    break
-
-                # ── Slash Commands (intercepted before entering agent loop) ──
-                if agent.handle_slash_command(query, history):
-                    cron_scheduler.UI_BUSY = False
-                    continue
-
-                trigger_hooks("UserPromptSubmit", query)
-                # Acquire agent_lock to prevent concurrent cron delivery.
-                # Use a loop with timeout to avoid indefinite blocking if the
-                # queue processor is running a scheduled delivery.
-                while True:
-                    if cron_scheduler.agent_lock.acquire(timeout=1):
-                        break
-                    print("\033[33m[Wait] A scheduled task is running, waiting...\033[0m")
-                cron_scheduler.UI_BUSY = False
-                try:
-                    history.append({"role": "user", "content": query})
-                    agent.agent_loop(history)
-                finally:
-                    cron_scheduler.agent_lock.release()
-
-                last = history[-1]
-                if last.get("content"):
-                    print(last["content"])
-                print()
-        finally:
-            # Stop cron scheduler and team wakeup
-            team_wakeup.stop()
-            cron_scheduler.stop()
-
-        # Session ended
-        trigger_hooks("Stop", SESSION_STATS)
-    finally:
-        # Close MCP adapters first, then the shared runtime (order matters:
-        # runtime.shutdown requires every adapter to be closed already).
-        if mcp_manager is not None:
-            mcp_manager.close_all()
-        shutdown_runtime()

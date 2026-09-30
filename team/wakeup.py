@@ -24,7 +24,7 @@ _thread: threading.Thread | None = None
 
 
 def start(agent, history: list) -> None:
-	"""Start the wakeup thread (called from agent_loop.__main__)."""
+	"""Start the wakeup thread (called from CodeHarness.start)."""
 	global _thread
 	_stop_event.clear()
 	_thread = threading.Thread(

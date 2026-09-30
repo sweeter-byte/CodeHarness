@@ -1,6 +1,6 @@
 """Leader-side team tools: lifecycle, worktree management, messaging, approval.
 
-Schema + handler pairs follow the task_system.py convention; agent_loop's
+Schema + handler pairs follow the task_system.py convention; CodeHarness Runtime's
 __main__ registers TEAM_TOOLS / TEAM_HANDLERS into the leader's
 ToolRegistry. Teammates never see these — their tool set is built from the
 base tool registry in teammate.py.

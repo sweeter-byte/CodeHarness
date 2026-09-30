@@ -19,7 +19,7 @@ SUB_MAX_ROUNDS = 30
 # The subagent tool set is exactly the base tool set, built explicitly from
 # its own registry — never a filtered view of the leader's pool. 'task'
 # (second-level delegation), task system tools, team tools and MCP tools are
-# Leader-only by construction: they are registered in agent_loop's __main__
+# Leader-only by construction: they are registered by the leader Runtime
 # registry, not in the base registry.
 _BASE_REGISTRY = build_base_registry()
 SUB_TOOLS = _BASE_REGISTRY.schemas
@@ -51,7 +51,7 @@ TASK_TOOL = {
 
 def run_task(prompt: str) -> str:
     """Run a nested agent loop in a fresh context; return its final text."""
-    from agent_loop import Agent          # lazy import to avoid circular dependency
+    from codeharness.core.agent import Agent          # lazy import to avoid circular dependency
     from codeharness.background import BackgroundManager
 
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")

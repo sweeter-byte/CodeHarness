@@ -93,9 +93,9 @@ class TeamManager:
 						f"{task.description}"),
 		})
 
-		# Lazy import: agent_loop imports team only in __main__, so this
+		# Lazy import: the leader Runtime imports team during assembly, so this
 		# module must not import it at module level (circular dependency).
-		from agent_loop import Agent
+		from codeharness.core.agent import Agent
 		state.agent = Agent(
 			system=teammate_system(state),
 			tools=list(TEAMMATE_TOOLS),

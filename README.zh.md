@@ -98,7 +98,7 @@ CodeHarness/
 │   ├── checkpoint.py       # ContextCheckpoint 结构化检查点
 │   ├── compactor.py        # Layer 4 语义压缩后端
 │   └── manager.py          # ContextManager 主入口，串联所有 Layer
-├── agent_loop.py           # 改造：集成 ContextManager
+├── core/agent.py           # Agent Loop Core：集成 ContextManager
 ├── tools.py                # 改造：新增 read_artifact 工具
 ├── hooks.py                # 改造：新增 Context Observability hook
 └── ...
@@ -106,7 +106,7 @@ CodeHarness/
 
 设计的数据流向是
 ```text
-                    agent_loop
+                 core/agent.py
                         │
                   ┌─────┴─────┐
                   │           │

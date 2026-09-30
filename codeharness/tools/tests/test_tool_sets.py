@@ -69,7 +69,7 @@ def test_teammate_tool_set_visibility():
 
 
 def test_leader_registry_assembly_and_duplicate_rejection():
-    """Mirror agent_loop __main__: base + task + task system + team + MCP."""
+    """Mirror CodeHarness.start: base + task + task system + team + MCP."""
     from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
     from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
     from team.tools import TEAM_TOOLS, TEAM_HANDLERS
