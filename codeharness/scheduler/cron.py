@@ -324,9 +324,20 @@ def start(
 	delivery_handler: Callable[[str], bool],
 	status_handler: Callable[[str], None] | None = None,
 ) -> None:
-	"""Initialize and start the cron scheduler threads."""
+	"""Initialize and start the cron scheduler threads.
+
+	Refuses to start while a previous generation of threads is still alive:
+	clearing RUNTIME_STOP here would resurrect the old runtime. Dead thread
+	references are treated as stale and cleaned up before starting fresh.
+	"""
 	global _cron_store, _scheduler_thread, _processor_thread
 	global _delivery_handler, _status_handler
+
+	for thread in (_scheduler_thread, _processor_thread):
+		if thread is not None and thread.is_alive():
+			raise RuntimeError("previous cron runtime is still stopping")
+	_scheduler_thread = None
+	_processor_thread = None
 
 	_delivery_handler = delivery_handler
 	_status_handler = status_handler
@@ -354,11 +365,15 @@ def start(
 def stop() -> None:
 	"""Stop scheduler threads and release Runtime-owned references.
 
-	Signals the stop event, joins both threads with a bounded timeout (never
-	waits forever — a delivery in progress may outlive the join), clears the
-	in-memory delivery queue, and drops the handler / store references so a
-	later cron tool call reports "scheduler not initialized". Durable jobs
-	stay on disk and are reloaded by the next start().
+	Signals the stop event and joins both threads with a bounded timeout
+	(never waits forever — a delivery in progress may outlive the join).
+	join() returning does NOT mean the thread exited, so state is only
+	released once both threads are verified dead; a thread still running
+	may be mid-delivery and needs _cron_store / _delivery_handler to
+	finish its current batch (one-shot remove, recurring reset, save).
+	In that case the references and RUNTIME_STOP are kept as-is and a
+	later stop() call completes the cleanup (stop is idempotent).
+	Durable jobs stay on disk and are reloaded by the next start().
 	"""
 	global _scheduler_thread, _processor_thread, _cron_store
 	global _delivery_handler, _status_handler
@@ -366,9 +381,22 @@ def stop() -> None:
 	RUNTIME_STOP.set()
 
 	current = threading.current_thread()
+	still_alive = False
 	for thread in (_scheduler_thread, _processor_thread):
 		if thread is not None and thread is not current:
 			thread.join(timeout=STOP_JOIN_TIMEOUT)
+		if thread is not None and thread.is_alive():
+			still_alive = True
+
+	if still_alive:
+		# Honest state: keep thread refs, handlers, store and the stop
+		# signal so the running thread can finish its current delivery.
+		_emit_status(
+			"\033[33m[Cron] Cron thread is still stopping; "
+			"state retained until it exits\033[0m"
+		)
+		return
+
 	_scheduler_thread = None
 	_processor_thread = None
 

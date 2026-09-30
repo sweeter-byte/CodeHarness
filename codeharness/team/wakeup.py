@@ -32,8 +32,17 @@ def start(
 	delivery_handler: Callable[[str], bool],
 	status_handler: Callable[[str], None] | None = None,
 ) -> None:
-	"""Start the wakeup thread (called from CodeHarness.start)."""
+	"""Start the wakeup thread (called from CodeHarness.start).
+
+	Refuses to start while the previous wakeup thread is still alive:
+	clearing _stop_event here would let the old thread keep running as a
+	zombie generation. A dead thread reference is stale and cleaned up.
+	"""
 	global _thread, _status_handler
+	if _thread is not None:
+		if _thread.is_alive():
+			raise RuntimeError("previous team wakeup is still stopping")
+		_thread = None
 	_status_handler = status_handler
 	_stop_event.clear()
 	_thread = threading.Thread(
@@ -47,16 +56,26 @@ def start(
 def stop() -> None:
 	"""Stop the wakeup thread and release its Runtime-owned references.
 
-	Sets the stop event, joins the thread with a bounded timeout (skipping a
-	self-join when called from the wakeup thread itself), then clears the
-	thread and status-handler references. The delivery_handler is held only
-	through the thread args, so it is released once the thread exits.
+	Sets the stop event and joins the thread with a bounded timeout
+	(skipping a self-join when called from the wakeup thread itself).
+	join() returning does NOT mean the thread exited — if it is still
+	alive (e.g. mid delivery_handler call), the thread reference and
+	status handler are kept and the stop event stays set; a later stop()
+	call completes the cleanup once the thread really exits (idempotent).
+	The delivery_handler is held only through the thread args, so it is
+	released once the thread exits.
 	"""
 	global _thread, _status_handler
 	_stop_event.set()
 	current = threading.current_thread()
 	if _thread is not None and _thread is not current:
 		_thread.join(timeout=STOP_JOIN_TIMEOUT)
+	if _thread is not None and _thread.is_alive():
+		_emit_status(
+			"\033[33m[team] wakeup thread is still stopping; "
+			"reference retained until it exits\033[0m"
+		)
+		return
 	_thread = None
 	_emit_status("\033[36m[team] wakeup thread stopped\033[0m")
 	_status_handler = None
