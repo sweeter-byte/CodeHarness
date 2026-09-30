@@ -68,11 +68,17 @@ def configure_permissions(allowed_dirs):
 
     Called by CodeHarness.start() so the native-tool permission boundary
     follows RuntimeConfig.workspace instead of the import-time os.getcwd().
-    The dependency stays Runtime → Permission; permission.py never imports
-    the runtime config itself.
+    The first allowed directory doubles as base_dir: relative paths in
+    permission checks resolve against the same workspace the coding tool
+    handlers use. The dependency stays Runtime → Permission; permission.py
+    never imports the runtime config itself.
     """
     global _perm_manager
-    _perm_manager = PermissionManager(allowed_dirs=[str(d) for d in allowed_dirs])
+    dirs = [str(d) for d in allowed_dirs]
+    _perm_manager = PermissionManager(
+        allowed_dirs=dirs,
+        base_dir=dirs[0] if dirs else None,
+    )
 
 
 def configure_mcp_permissions(resolve, annotations_of=None):

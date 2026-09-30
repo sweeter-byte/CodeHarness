@@ -85,11 +85,21 @@ MCP_HOST_POLICY = {
 
 class PermissionManager:
     def __init__(self, allowed_dirs: list[str] | None = None,
-                 mcp_resolve=None, mcp_annotations_of=None):
+                 mcp_resolve=None, mcp_annotations_of=None,
+                 base_dir: str | Path | None = None):
         if allowed_dirs:
-            self.allowed_dirs = [Path(d).resolve() for d in allowed_dirs]
+            self.allowed_dirs = [Path(d).expanduser().resolve() for d in allowed_dirs]
         else:
             self.allowed_dirs = [Path(os.getcwd()).resolve()]
+        # Base directory for resolving RELATIVE paths in safety checks. The
+        # Runtime passes its workspace here so permission checks evaluate the
+        # same paths the coding tool handlers (bound to RuntimeConfig.workspace)
+        # will actually touch. When absent (standalone construction in tests)
+        # we fall back to the process cwd, preserving the old behavior.
+        if base_dir is not None:
+            self.base_dir = Path(base_dir).expanduser().resolve()
+        else:
+            self.base_dir = Path(os.getcwd()).resolve()
         # Small injected callables (not the MCPManager itself) keep the
         # permission layer decoupled from MCP lifecycle management:
         #   mcp_resolve(prefixed)        -> (server, raw_tool) | None
@@ -111,12 +121,34 @@ class PermissionManager:
         except ValueError:
             return False
 
+    def _resolve_path(self, path_str: str) -> Path:
+        """Resolve a possibly-relative path against self.base_dir.
+
+        Single resolution entry point for every path safety check: relative
+        paths are anchored to base_dir (the Runtime workspace), never to the
+        implicit process cwd.
+        """
+        p = Path(path_str).expanduser()
+        if not p.is_absolute():
+            p = self.base_dir / p
+        return p.resolve()
+
     def _is_path_safe(self, path_str: str) -> bool:
         try:
-            p = Path(path_str).expanduser().resolve()
+            p = self._resolve_path(path_str)
         except (OSError, ValueError):
             return False
         return any(self._is_subpath(p, d) for d in self.allowed_dirs)
+
+    def _glob_pattern_escapes(self, pattern: str) -> bool:
+        """Lightweight boundary check for glob patterns.
+
+        Deliberately conservative: any '..' path component in the pattern
+        means the glob may traverse outside the workspace, so it must be
+        approved. Ordinary wildcards ('*', '**', '?') are never blocked and
+        no glob parser is implemented here.
+        """
+        return ".." in pattern.split("/")
 
     # ── Path extraction ───────────────────────────────────────
 
@@ -156,16 +188,19 @@ class PermissionManager:
               - "allow": safe to execute without asking
               - "deny":  forbidden, do NOT execute
               - "ask":   requires user approval before executing
+
+        Order matters: MCP policy → path boundary → read-only auto-allow →
+        bash deny/ask rules → write confirmation. Read-only means "needs no
+        dangerous-operation approval", NOT "may cross the workspace
+        boundary", so the safe-path check runs before SAFE_TOOLS_AUTO.
         """
         # MCP tools are gated by the host policy, not by path/bash rules.
         if tool_name.startswith(MCP_TOOL_PREFIX):
             return self._check_mcp(tool_name, args)
 
-        # Read-only tools are always safe.
-        if tool_name in SAFE_TOOLS_AUTO:
-            return "allow", "Read-only tool, auto-allowed"
-
-        # Layer 1: Safe-path check.
+        # Layer 1: Safe-path check — every extracted path (including those
+        # scraped from bash commands, best-effort: this is a permission hint,
+        # not an OS-level sandbox) must stay inside the allowed directories.
         paths = self._extract_paths_from_args(tool_name, args)
         if tool_name == "bash":
             paths += self._extract_bash_paths(args.get("command", ""))
@@ -173,6 +208,17 @@ class PermissionManager:
         for p in paths:
             if not self._is_path_safe(p):
                 return "ask", f"Path outside allowed directories: {p}"
+
+        # glob has no path parameter, only a pattern; reject conservative
+        # '..' traversal before the read-only auto-allow below.
+        if tool_name == "glob":
+            pattern = args.get("pattern", "")
+            if self._glob_pattern_escapes(pattern):
+                return "ask", f"Glob pattern may escape allowed directories: {pattern}"
+
+        # Read-only tools are auto-allowed (after the boundary checks above).
+        if tool_name in SAFE_TOOLS_AUTO:
+            return "allow", "Read-only tool, auto-allowed"
 
         # Layer 2, Level 1: Deny list.
         if tool_name == "bash":
