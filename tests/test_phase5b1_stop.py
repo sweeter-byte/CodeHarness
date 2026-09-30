@@ -81,7 +81,7 @@ def test_cron_stop_timeout_retains_threads_and_state(cron_env):
     scheduler, processor = cron._scheduler_thread, cron._processor_thread
     store = cron.get_store()
 
-    cron.stop()  # join times out while the processor is inside the handler
+    assert cron.stop() is False  # processor is still inside the handler
 
     # 1: processor thread reference is retained, not set to None.
     assert cron._processor_thread is processor
@@ -125,7 +125,7 @@ def test_cron_second_stop_after_thread_exits_completes_cleanup(cron_env):
     gate.set()
     assert _wait_until(lambda: not processor.is_alive())
 
-    cron.stop()  # idempotent second call completes cleanup
+    assert cron.stop() is True  # idempotent second call completes cleanup
     assert cron._scheduler_thread is None
     assert cron._processor_thread is None
     assert cron._delivery_handler is None
@@ -212,7 +212,7 @@ def test_wakeup_stop_timeout_retains_thread_reference(wakeup_env):
     gate = _start_wakeup_with_blocked_delivery(wakeup)
     thread = wakeup._thread
 
-    wakeup.stop()  # join times out inside the blocked delivery_handler
+    assert wakeup.stop() is False  # blocked inside the delivery_handler
 
     # 6: the thread reference survives; stop does not pretend it exited.
     assert wakeup._thread is thread
@@ -253,7 +253,7 @@ def test_wakeup_second_stop_after_thread_exits_completes_cleanup(wakeup_env):
     gate.set()
     assert _wait_until(lambda: not thread.is_alive())
 
-    wakeup.stop()
+    assert wakeup.stop() is True
     assert wakeup._thread is None
     assert wakeup._status_handler is None
 

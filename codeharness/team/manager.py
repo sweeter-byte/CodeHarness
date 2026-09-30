@@ -8,6 +8,7 @@ handshake — the thread is never killed.
 """
 
 import threading
+import time
 
 from codeharness.tasks import TASKS, AGENT_NAMES
 from codeharness.background import BackgroundManager
@@ -140,6 +141,53 @@ class TeamManager:
 		return (f"Shutdown request sent to {name} "
 				f"(request_id={req.request_id}); it will exit after finishing "
 				"its current step and respond via shutdown_response.")
+
+	def shutdown_all(self, timeout: float) -> bool:
+		"""Gracefully stop a snapshot of teammates within a shared timeout.
+
+		Live workers receive the existing structured shutdown request. State
+		and Team-scoped transient messages are cleared only after every
+		snapshotted thread has exited; a timed-out call remains retryable.
+		"""
+		states = self.list_states()
+		for state in states:
+			thread = state.thread
+			if thread is None or not thread.is_alive():
+				continue
+			req = protocol.create_request(
+				"shutdown_request", LEADER, state.name,
+				"shutdown requested by Runtime close",
+			)
+			BUS.send(
+				LEADER, state.name,
+				"Leader requested shutdown. Finish your current step and exit.",
+				"shutdown_request",
+				metadata={"request_id": req.request_id},
+			)
+
+		deadline = time.monotonic() + max(0.0, timeout)
+		current = threading.current_thread()
+		for state in states:
+			thread = state.thread
+			if thread is not None and thread is not current and thread.is_alive():
+				thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+		if any(
+			state.thread is not None and state.thread.is_alive()
+			for state in states
+		):
+			return False
+
+		# teammate_main normally removes its own state. Also prune stale dead
+		# snapshot entries so a repeated shutdown remains harmless.
+		with self._lock:
+			for state in states:
+				if self._states.get(state.name) is state:
+					self._states.pop(state.name, None)
+
+		BUS.read_inbox(LEADER)
+		protocol.clear()
+		return True
 
 	def status(self) -> str:
 		"""Human-readable table of live teammates."""

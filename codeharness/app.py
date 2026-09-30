@@ -29,6 +29,9 @@ from codeharness.mcp import (
 from codeharness.tools import build_base_registry, TodoManager
 
 
+CLOSE_TIMEOUT = 5.0
+
+
 class CodeHarness:
     """Unified backend API for one leader Agent runtime."""
 
@@ -48,6 +51,7 @@ class CodeHarness:
         self.session_stats = new_session_stats()
         self._turn_lock = threading.Lock()
         self._user_turn_pending = threading.Event()
+        self._closing = threading.Event()
         self._started = False
         self._closed = False
         self._cron_started = False
@@ -94,10 +98,12 @@ class CodeHarness:
 
     def start(self) -> "CodeHarness":
         """Assemble and start the complete leader runtime once."""
-        if self._started:
-            return self
         if self._closed:
             raise RuntimeError("CodeHarness has already been closed")
+        if self._closing.is_set():
+            raise RuntimeError("CodeHarness is closing")
+        if self._started:
+            return self
 
         self.client = OpenAI(
             api_key=self.config.api_key,
@@ -154,26 +160,29 @@ class CodeHarness:
         )
         self.history = []
 
+        self._cron_started = True
         cron.start(
             delivery_handler=self._try_deliver_async,
             status_handler=self._emit_status,
         )
-        self._cron_started = True
+        self._team_wakeup_started = True
         team_wakeup.start(
             delivery_handler=self._try_deliver_async,
             status_handler=self._emit_status,
         )
-        self._team_wakeup_started = True
+        self._closing.clear()
         self._started = True
         return self
 
     def run(self, query: str) -> str:
         """Run one user turn while serializing access to shared history."""
+        self._require_not_closing()
         self._require_started()
         self._user_turn_pending.set()
         acquired = False
         try:
             while not acquired:
+                self._require_not_closing()
                 acquired = self._turn_lock.acquire(timeout=1)
                 if not acquired:
                     self._emit_status(
@@ -181,6 +190,7 @@ class CodeHarness:
                         "running, waiting...\033[0m"
                     )
             self._user_turn_pending.clear()
+            self._require_not_closing()
             trigger_hooks("UserPromptSubmit", query)
             self.history.append({"role": "user", "content": query})
             return self._run_agent_turn(interactive_approval=True)
@@ -191,6 +201,8 @@ class CodeHarness:
 
     def _try_deliver_async(self, content: str) -> bool:
         """Deliver one background event without waiting for the leader turn."""
+        if self._closing.is_set():
+            return False
         self._require_started()
         if self._user_turn_pending.is_set():
             return False
@@ -201,7 +213,7 @@ class CodeHarness:
         try:
             # Close the race where a user turn becomes pending between the
             # first check and this non-blocking lock acquisition.
-            if self._user_turn_pending.is_set():
+            if self._closing.is_set() or self._user_turn_pending.is_set():
                 return False
             injected = {"role": "user", "content": content}
             self.history.append(injected)
@@ -244,19 +256,25 @@ class CodeHarness:
                 return
 
     def context_info(self) -> str:
+        self._require_not_closing()
         self._require_started()
         with self._turn_lock:
+            self._require_not_closing()
             return self.agent.context_manager.get_observability_report(self.history)
 
     def compact(self) -> str:
+        self._require_not_closing()
         self._require_started()
         with self._turn_lock:
+            self._require_not_closing()
             self.history[:] = self.agent.context_manager.compact_history(self.history)
             return "✓ Context compacted."
 
     def clear(self) -> str:
+        self._require_not_closing()
         self._require_started()
         with self._turn_lock:
+            self._require_not_closing()
             self.history.clear()
             self.agent.context_manager.set_active_request("")
             return "✓ Context cleared."
@@ -274,79 +292,95 @@ class CodeHarness:
             self.agent.approval_handler = None
             self.agent.status_handler = None
 
-    def close(self) -> None:
-        """Release Runtime-owned state and external resources.
+    def close(self) -> bool:
+        """Quiesce Runtime workers, then release dependencies.
 
-        Every step is guarded so a failure in one cleanup action never
-        prevents the remaining ones from running: start() may have failed
-        partway (partial MCP connect, cron up but wakeup down, ...), so
-        close() must be safe regardless of how far start() got.
+        A timeout retains Runtime state so a later close() can safely retry.
         """
         if self._closed:
-            return
+            return True
+        self._closing.set()
 
-        # 1. stop Team Wakeup
-        try:
-            if self._team_wakeup_started:
-                team_wakeup.stop()
-        except Exception:
-            pass
-        finally:
-            self._team_wakeup_started = False
-
-        # 2. stop Cron
-        try:
+        def stop_producers() -> tuple[bool, bool]:
+            cron_stopped = not self._cron_started
+            wakeup_stopped = not self._team_wakeup_started
             if self._cron_started:
-                cron.stop()
-        except Exception:
-            pass
-        finally:
-            self._cron_started = False
+                try:
+                    cron_stopped = cron.stop() is not False
+                except Exception:
+                    cron_stopped = False
+                if cron_stopped:
+                    self._cron_started = False
+            if self._team_wakeup_started:
+                try:
+                    wakeup_stopped = team_wakeup.stop() is not False
+                except Exception:
+                    wakeup_stopped = False
+                if wakeup_stopped:
+                    self._team_wakeup_started = False
+            return cron_stopped, wakeup_stopped
 
-        # 3. Stop Hook / Session Summary (Runtime-owned stats)
+        # Stop sources of new async turns before waiting for the active Turn.
+        cron_stopped, wakeup_stopped = stop_producers()
+
+        # Only a successfully started Runtime can have an active Turn.
+        if self._started:
+            if not self._turn_lock.acquire(timeout=CLOSE_TIMEOUT):
+                return False
+            self._turn_lock.release()
+
+        # A producer may have timed out while completing its delivery.
+        retry_cron, retry_wakeup = stop_producers()
+        cron_stopped = cron_stopped or retry_cron
+        wakeup_stopped = wakeup_stopped or retry_wakeup
+
+        try:
+            team_stopped = TEAM.shutdown_all(timeout=CLOSE_TIMEOUT)
+        except Exception:
+            team_stopped = False
+        if not (cron_stopped and wakeup_stopped and team_stopped):
+            return False
+
         try:
             if self._started:
                 trigger_hooks("Stop", self.session_stats)
         except Exception:
             pass
 
-        # 4. clear SubAgent factory
         try:
             configure_subagent_agent_factory(None)
         except Exception:
             pass
 
-        # 5. clear Team agent factory
         try:
             TEAM.set_agent_factory(None)
         except Exception:
             pass
 
-        # 6. clear MCP permission provider
         try:
             hooks.clear_mcp_permissions()
         except Exception:
             pass
 
-        # 7. close MCP adapters
         try:
             if self.mcp_manager is not None:
                 self.mcp_manager.close_all()
         except Exception:
             pass
 
-        # 8. shutdown MCP runtime
         try:
             shutdown_runtime()
         except Exception:
             pass
 
-        # 9. clear Runtime callbacks (last: shutdown may still emit status)
         self._clear_callbacks()
-
-        # 10. mark closed
         self._started = False
         self._closed = True
+        return True
+
+    def _require_not_closing(self) -> None:
+        if self._closing.is_set():
+            raise RuntimeError("CodeHarness is closing")
 
     def _require_started(self) -> None:
         if not self._started or self.agent is None or self.history is None:

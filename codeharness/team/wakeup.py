@@ -53,7 +53,7 @@ def start(
 	_emit_status("\033[36m[team] wakeup thread started\033[0m")
 
 
-def stop() -> None:
+def stop() -> bool:
 	"""Stop the wakeup thread and release its Runtime-owned references.
 
 	Sets the stop event and joins the thread with a bounded timeout
@@ -75,10 +75,11 @@ def stop() -> None:
 			"\033[33m[team] wakeup thread is still stopping; "
 			"reference retained until it exits\033[0m"
 		)
-		return
+		return False
 	_thread = None
 	_emit_status("\033[36m[team] wakeup thread stopped\033[0m")
 	_status_handler = None
+	return True
 
 
 def _wakeup_loop(delivery_handler: Callable[[str], bool]) -> None:

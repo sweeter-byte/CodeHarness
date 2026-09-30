@@ -380,6 +380,12 @@ def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
         raise RuntimeError("wakeup failed to start")
 
     monkeypatch.setattr(app_module.team_wakeup, "start", _boom)
+    wakeup_stopped = []
+    monkeypatch.setattr(
+        app_module.team_wakeup,
+        "stop",
+        lambda: wakeup_stopped.append(True) or True,
+    )
 
     config = RuntimeConfig(
         api_key="key",
@@ -402,6 +408,7 @@ def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
 
     assert harness._closed is True
     assert cron_stopped == [True]
+    assert wakeup_stopped == [True]
     assert subagent._agent_factory is None
     assert TEAM._agent_factory is None
 

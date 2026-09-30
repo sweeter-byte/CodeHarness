@@ -99,3 +99,9 @@ def resolve(request_id: str, status: str) -> ProtocolState | None:
 def get_request(request_id: str) -> ProtocolState | None:
 	with _REQUESTS_LOCK:
 		return PENDING_REQUESTS.get(request_id)
+
+
+def clear() -> None:
+	"""Clear Team-scoped in-memory protocol state after full shutdown."""
+	with _REQUESTS_LOCK:
+		PENDING_REQUESTS.clear()

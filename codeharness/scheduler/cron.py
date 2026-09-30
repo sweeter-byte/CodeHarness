@@ -362,7 +362,7 @@ def start(
 	_emit_status("\033[36m[Cron] Scheduler started\033[0m")
 
 
-def stop() -> None:
+def stop() -> bool:
 	"""Stop scheduler threads and release Runtime-owned references.
 
 	Signals the stop event and joins both threads with a bounded timeout
@@ -395,7 +395,7 @@ def stop() -> None:
 			"\033[33m[Cron] Cron thread is still stopping; "
 			"state retained until it exits\033[0m"
 		)
-		return
+		return False
 
 	_scheduler_thread = None
 	_processor_thread = None
@@ -409,6 +409,7 @@ def stop() -> None:
 	_delivery_handler = None
 	_status_handler = None
 	_cron_store = None
+	return True
 
 
 def get_store() -> CronStore | None:

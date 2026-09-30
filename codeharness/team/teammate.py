@@ -353,21 +353,33 @@ def _idle_loop(state: TeammateState) -> str | None:
 		inbox = BUS.wait_for_messages(state.name, timeout=timeout)
 
 		if inbox:
-			for m in inbox:
-				mtype = m.get("type", "message")
-				if mtype == "shutdown_request":
-					_handle_shutdown(state, m)
-					return None
-				if mtype == "plan_approval_response":
-					if _handle_plan_response(state, m):
+			# The inbox is read-and-delete, so inspect the complete batch for
+			# shutdown before returning ordinary work.
+			shutdown = next(
+				(m for m in inbox if m.get("type") == "shutdown_request"),
+				None,
+			)
+			if shutdown is not None:
+				_handle_shutdown(state, shutdown)
+				return None
+
+			for message in inbox:
+				if message.get("type") == "plan_approval_response":
+					if _handle_plan_response(state, message):
 						return "work"
-					continue  # stale/mismatched response — keep waiting
-				if mtype in ("message", "result", "idle_notification"):
+
+			for message in inbox:
+				if message.get("type", "message") in (
+					"message", "result", "idle_notification",
+				):
 					# A direct instruction interrupts idle; results from
 					# other teammates arrive as plain context.
 					state.messages.append({
 						"role": "user",
-						"content": f"[Message from {m['from']}]: {m['content']}",
+						"content": (
+							f"[Message from {message['from']}]: "
+							f"{message['content']}"
+						),
 					})
 					return "work"
 			continue
