@@ -23,6 +23,11 @@ class TeamManager:
 	def __init__(self):
 		self._states: dict[str, TeammateState] = {}
 		self._lock = threading.Lock()
+		self._agent_factory = None
+
+	def set_agent_factory(self, factory) -> None:
+		"""Configure the Runtime-owned factory used for teammate agents."""
+		self._agent_factory = factory
 
 	# ── registry helpers ──
 
@@ -59,6 +64,9 @@ class TeamManager:
 	def spawn(self, task_id: str, name: str | None = None,
 			  require_plan: bool = False) -> str:
 		"""Claim the initial task, then start the teammate thread."""
+		if self._agent_factory is None:
+			return "Error: agent factory is not configured; start CodeHarness first"
+
 		if name is not None:
 			name = name.strip()
 			if not name:
@@ -93,10 +101,7 @@ class TeamManager:
 						f"{task.description}"),
 		})
 
-		# Lazy import: the leader Runtime imports team during assembly, so this
-		# module must not import it at module level (circular dependency).
-		from codeharness.core.agent import Agent
-		state.agent = Agent(
+		state.agent = self._agent_factory(
 			system=teammate_system(state),
 			tools=list(TEAMMATE_TOOLS),
 			handlers=make_teammate_handlers(state),

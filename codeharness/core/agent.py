@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
 from codeharness.tools.todo import TODO as DEFAULT_TODO
@@ -37,7 +38,9 @@ class Agent:
                  client=None,
                  model: str = None,
                  model_context_window: int = None,
-                 workspace: str = None):
+                 workspace: str = None,
+                 approval_handler: Callable[[str], bool] | None = None,
+                 status_handler: Callable[[str], None] | None = None):
         self.client = client if client is not None else OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -61,9 +64,11 @@ class Agent:
                 else MemoryManager(client=self.client, model=self.model)
 
         # ── Interaction mode ──
-        # interactive=False: permission 'ask' decisions are rejected instead
-        # of prompting input() — required for teammate daemon threads.
+        # interactive=False: permission 'ask' decisions are rejected without
+        # consulting an approval handler — required for teammate daemon threads.
         self.interactive = interactive
+        self.approval_handler = approval_handler
+        self.status_handler = status_handler
 
         base_system = system or build_default_system_prompt(workspace or os.getcwd())
 
@@ -92,6 +97,10 @@ class Agent:
         self.context_manager.configure_llm(self.client, self.model)
         self.context_manager.system_prompt = self.system
         self.context_manager.tool_schemas = self.tools
+
+    def _emit_status(self, message: str) -> None:
+        if self.status_handler is not None:
+            self.status_handler(message)
 
     def _accumulate_tokens(self, response):
         """Add token usage from an LLM response to SESSION_STATS."""
@@ -126,7 +135,7 @@ class Agent:
         if hook_result is not None:
             # A hook returned non-None → execution blocked.
             output = hook_result
-            print(f"\033[31m✗ BLOCKED {tool_name}: {output}\033[0m")
+            self._emit_status(f"\033[31m✗ BLOCKED {tool_name}: {output}\033[0m")
             executed = False
         elif hooks.PENDING_USER_ASK.value is not None:
             # Permission hook flagged "ask" → prompt the user.
@@ -141,23 +150,32 @@ class Agent:
                     "Report the blocker to your leader via send_message, or "
                     "adjust your approach to avoid this operation."
                 )
-                print(f"\033[31m  ✗ [non-interactive] rejected: {reason}\033[0m")
+                self._emit_status(
+                    f"\033[31m  ✗ [non-interactive] rejected: {reason}\033[0m"
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "content": output,
                 })
                 return False
-            print(f"\033[33m  ⚠ {reason}\033[0m")
-            answer = input("\033[33m  Allow? [y/N]: \033[0m").strip().lower()
-            if answer != "y":
+            if self.approval_handler is None:
+                output = (
+                    "Error: This operation requires user approval, but no "
+                    "approval handler is configured. Operation rejected."
+                )
+                self._emit_status(
+                    f"\033[31m  ✗ Approval unavailable; rejected: {reason}\033[0m"
+                )
+                executed = False
+            elif not self.approval_handler(reason):
                 output = (
                     "Error: User rejected this operation. "
                     "Do NOT retry via alternative commands or paths. "
                     "If you cannot complete the task without this operation, "
                     "report what you have done and stop."
                 )
-                print("\033[31m  ✗ Rejected by user\033[0m")
+                self._emit_status("\033[31m  ✗ Rejected by user\033[0m")
                 executed = False
             else:
                 if should_run_background(tool_name, args):
@@ -242,7 +260,10 @@ class Agent:
                         "content": f"The user has rejected {consecutive_rejections} consecutive operations. "
                                    "Do NOT retry. Report what you have accomplished so far and stop.",
                     })
-                    print(f"\033[31m✗ {consecutive_rejections} consecutive rejections, stopping agent loop.\033[0m")
+                    self._emit_status(
+                        f"\033[31m✗ {consecutive_rejections} consecutive "
+                        "rejections, stopping agent loop.\033[0m"
+                    )
                     consecutive_rejections = 0
                     response = self._call_llm(messages)
                     msg = response.choices[0].message
@@ -254,7 +275,9 @@ class Agent:
                 except Exception as e:
                     if ("context" in str(e).lower() or "token" in str(e).lower()
                             ) and reactive_retries < MAX_REACTIVE_RETRIES:
-                        print("\033[33m⚠ Context overflow, reactive compacting...\033[0m")
+                        self._emit_status(
+                            "\033[33m⚠ Context overflow, reactive compacting...\033[0m"
+                        )
                         messages[:] = self.context_manager.reactive_compact(messages)
                         reactive_retries += 1
                         continue

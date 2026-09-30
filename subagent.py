@@ -13,8 +13,17 @@ SUB_SYSTEM = (
     f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
     "Use load_skill to read the full instructions when a skill applies."
 )
-
 SUB_MAX_ROUNDS = 30
+
+
+_agent_factory = None
+
+
+def configure_agent_factory(factory) -> None:
+    """Configure the Runtime-owned factory used for one-shot agents."""
+    global _agent_factory
+    _agent_factory = factory
+
 
 # The subagent tool set is exactly the base tool set, built explicitly from
 # its own registry — never a filtered view of the leader's pool. 'task'
@@ -51,8 +60,12 @@ TASK_TOOL = {
 
 def run_task(prompt: str) -> str:
     """Run a nested agent loop in a fresh context; return its final text."""
-    from codeharness.core.agent import Agent          # lazy import to avoid circular dependency
     from codeharness.background import BackgroundManager
+
+    if _agent_factory is None:
+        raise RuntimeError(
+            "SubAgent agent factory is not configured; start CodeHarness first"
+        )
 
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
     sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop
@@ -60,13 +73,14 @@ def run_task(prompt: str) -> str:
     sub_handlers = dict(SUB_HANDLERS)
     sub_handlers["todo_write"] = make_todo_handler(sub_todo)
 
-    sub = Agent(
+    sub = _agent_factory(
         system=SUB_SYSTEM,
         tools=SUB_TOOLS,
         handlers=sub_handlers,
         max_rounds=SUB_MAX_ROUNDS,
         todo_manager=sub_todo,
         background_manager=sub_bg,
+        interactive=True,
     )
     messages = [{"role": "user", "content": prompt}]
     result = sub.agent_loop(messages) or "(no summary)"

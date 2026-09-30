@@ -6,6 +6,16 @@ class CLI:
         self.harness = harness
         self.input = input_fn
         self.output = output_fn
+        self.harness.set_approval_handler(self.request_approval)
+        self.harness.set_status_handler(self.show_status)
+
+    def request_approval(self, reason: str) -> bool:
+        self.output(reason)
+        answer = self.input("\033[33m  Allow? [y/N]: \033[0m")
+        return answer.strip().lower() == "y"
+
+    def show_status(self, message: str) -> None:
+        self.output(message)
 
     def run(self) -> None:
         self.output(

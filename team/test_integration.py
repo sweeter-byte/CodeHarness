@@ -37,7 +37,7 @@ os.chdir(TMP)
 
 # Stub the openai SDK when it is not installed in this environment — the
 # FakeAgent below never talks to an LLM, and Agent's real constructor is
-# never reached (core.agent.Agent is replaced before any spawn).
+# never reached (the fake is injected through TeamManager's agent factory).
 try:
 	import openai  # noqa: F401
 except ImportError:
@@ -49,7 +49,6 @@ except ImportError:
 	_openai_stub.OpenAI = _OpenAIStub
 	sys.modules["openai"] = _openai_stub
 
-from codeharness.core import agent as agent_module  # noqa: E402
 
 # ── FakeAgent: drives the teammate's handlers per a scripted action list ──
 
@@ -70,9 +69,6 @@ class FakeAgent:
 	def agent_loop(self, messages):
 		action = SCRIPT.pop(0) if SCRIPT else (lambda agent, msgs: "idle turn")
 		return action(self, messages)
-
-
-agent_module.Agent = FakeAgent
 
 
 def extract_task_id(messages):
@@ -97,6 +93,7 @@ def wait_for(predicate, timeout=10.0, what="condition"):
 def main():
 	import team  # noqa: F401  (registers everything)
 	from team import TEAM, BUS, LEADER
+	TEAM.set_agent_factory(FakeAgent)
 	from task_system import TASKS
 	from team import tools as team_tools
 

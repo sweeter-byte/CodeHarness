@@ -73,6 +73,12 @@ def test_cli_routes_slash_commands_through_harness():
         def __init__(self):
             self.calls = []
 
+        def set_approval_handler(self, handler):
+            self.approval_handler = handler
+
+        def set_status_handler(self, handler):
+            self.status_handler = handler
+
         def context_info(self):
             self.calls.append("context")
             return "context report"
