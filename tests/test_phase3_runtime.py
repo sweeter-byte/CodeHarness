@@ -79,6 +79,9 @@ def test_cli_routes_slash_commands_through_harness():
         def set_status_handler(self, handler):
             self.status_handler = handler
 
+        def set_async_result_handler(self, handler):
+            self.async_result_handler = handler
+
         def context_info(self):
             self.calls.append("context")
             return "context report"

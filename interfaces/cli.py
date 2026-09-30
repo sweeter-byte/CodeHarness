@@ -8,6 +8,7 @@ class CLI:
         self.output = output_fn
         self.harness.set_approval_handler(self.request_approval)
         self.harness.set_status_handler(self.show_status)
+        self.harness.set_async_result_handler(self.show_async_result)
 
     def request_approval(self, reason: str) -> bool:
         self.output(reason)
@@ -16,6 +17,10 @@ class CLI:
 
     def show_status(self, message: str) -> None:
         self.output(message)
+
+    def show_async_result(self, result: str) -> None:
+        self.output(f"\n{result}\n")
+        self.output("\033[36m>> \033[0m")
 
     def run(self) -> None:
         self.output(

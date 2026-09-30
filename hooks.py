@@ -47,6 +47,14 @@ class _PendingAskLocal(threading.local):
 
 PENDING_USER_ASK = _PendingAskLocal()
 
+
+class _InteractiveApprovalLocal(threading.local):
+    def __init__(self):
+        self.value = True
+
+
+INTERACTIVE_APPROVAL_ALLOWED = _InteractiveApprovalLocal()
+
 _perm_manager = PermissionManager()
 
 
@@ -118,7 +126,7 @@ def permission_hook(tool_name: str, args: dict):
       deny  → return rejection string (blocks execution)
       ask   → set PENDING_USER_ASK, return None (loop handles the prompt)
       allow → return None
-    During cron turns, 'ask' decisions are rejected instead of prompting.
+    During background turns, 'ask' decisions are rejected instead of prompting.
     """
     decision, reason = _perm_manager.check(tool_name, args)
 
@@ -128,11 +136,10 @@ def permission_hook(tool_name: str, args: dict):
             "Do NOT retry this operation via alternative commands."
         )
     if decision == "ask":
-        # During scheduled (cron) turns, reject interactive approvals
-        from cron_scheduler import CRON_TURN
-        if CRON_TURN:
+        if not INTERACTIVE_APPROVAL_ALLOWED.value:
             return (
-                f"Error: Interactive approval not available during scheduled execution - {reason}. "
+                "Error: Interactive approval not available during background "
+                f"execution - {reason}. "
                 "Use non-interactive commands only."
             )
         PENDING_USER_ASK.value = reason

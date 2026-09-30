@@ -292,6 +292,9 @@ def test_cli_registers_handlers_and_approval_accepts_only_y():
         def set_status_handler(self, handler):
             self.status_handler = handler
 
+        def set_async_result_handler(self, handler):
+            self.async_result_handler = handler
+
     answers = iter(["Y", "yes", "n"])
     output = []
     harness = FakeHarness()

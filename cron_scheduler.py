@@ -9,6 +9,7 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
@@ -19,22 +20,16 @@ SCHEDULED_TASKS_FILE = Path(".scheduled_tasks.json")
 POLL_INTERVAL = 1.0       # Scheduler polls every 1 second
 QUEUE_POLL_INTERVAL = 0.2 # Queue processor checks every 200ms
 
-# ── Shared State ───────────────────────────────────────────────
-
-# Lock to prevent concurrent modification of history by user input and cron delivery.
-agent_lock = threading.Lock()
-
-# Flag indicating the Agent is currently executing a scheduled (cron) turn.
-# Permission hook checks this to reject interactive approvals.
-CRON_TURN = False
-
-# Flag indicating the main thread is at input() waiting for user input.
-# Queue Processor defers its print() calls while this is True to avoid
-# interleaving output with the terminal's input line.
-UI_BUSY = False
-
 # Global stop event for graceful shutdown.
 RUNTIME_STOP = threading.Event()
+
+_delivery_handler: Callable[[str], bool] | None = None
+_status_handler: Callable[[str], None] | None = None
+
+
+def _emit_status(message: str) -> None:
+	if _status_handler is not None:
+		_status_handler(message)
 
 # ── Data Model ─────────────────────────────────────────────────
 
@@ -155,9 +150,15 @@ class CronStore:
 				# Reset pending_delivery on reload (in-flight deliveries are lost)
 				job.pending_delivery = False
 				self.jobs[job.id] = job
-			print(f"\033[36m[Cron] Loaded {len(self.jobs)} durable job(s) from {self.path}\033[0m")
+			_emit_status(
+				f"\033[36m[Cron] Loaded {len(self.jobs)} durable job(s) "
+				f"from {self.path}\033[0m"
+			)
 		except (json.JSONDecodeError, KeyError, TypeError) as e:
-			print(f"\033[31m[Cron] Error loading {self.path}: {e}. Starting with empty state.\033[0m")
+			_emit_status(
+				f"\033[31m[Cron] Error loading {self.path}: {e}. "
+				"Starting with empty state.\033[0m"
+			)
 
 	def save(self) -> None:
 		"""Atomically write all durable jobs to disk."""
@@ -170,7 +171,7 @@ class CronStore:
 			)
 			os.replace(tmp_path, self.path)
 		except OSError as e:
-			print(f"\033[31m[Cron] Failed to save: {e}\033[0m")
+			_emit_status(f"\033[31m[Cron] Failed to save: {e}\033[0m")
 			raise
 
 	@staticmethod
@@ -234,6 +235,12 @@ def consume_delivery_queue() -> list[CronJob]:
 	return jobs
 
 
+def _restore_delivery_queue(jobs: list[CronJob]) -> None:
+	"""Put an unaccepted batch back ahead of newly queued jobs."""
+	with _delivery_lock:
+		_delivery_queue[0:0] = jobs
+
+
 def has_delivery_queue() -> bool:
 	with _delivery_lock:
 		return len(_delivery_queue) > 0
@@ -269,65 +276,40 @@ def _scheduler_loop(stop_event: threading.Event) -> None:
 		stop_event.wait(POLL_INTERVAL)
 
 
-# ── Queue Processor Thread ─────────────────────────────────────
-
-_agent_ref = None  # Set during start() to avoid circular import
-_history_ref: list | None = None  # Reference to the shared history list
-
-
 def _queue_processor_loop(stop_event: threading.Event) -> None:
-	"""Check delivery queue every 200ms; when Agent is idle, deliver jobs."""
-	global CRON_TURN
+	"""Offer queued jobs to the Runtime and retain unaccepted deliveries."""
 	while not stop_event.is_set():
-		# Don't compete for the lock or start delivery while the user is
-		# at input() — their typed input and our print() would interleave
-		# on the shared terminal, corrupting the display.
-		if UI_BUSY or not has_delivery_queue() or not agent_lock.acquire(blocking=False):
+		if not has_delivery_queue() or _delivery_handler is None:
 			stop_event.wait(QUEUE_POLL_INTERVAL)
 			continue
+
+		fired = consume_delivery_queue()
+		content = "\n".join(f"[Scheduled] {job.prompt}" for job in fired)
+		for job in fired:
+			_emit_status(
+				f"\033[36m[Cron] Delivering {job.id}: {job.prompt}\033[0m"
+			)
+
 		try:
-			if has_delivery_queue() and _agent_ref is not None and _history_ref is not None:
-				CRON_TURN = True
-				fired = consume_delivery_queue()
-				# Inject scheduled messages into history
-				for job in fired:
-					_history_ref.append({
-						"role": "user",
-						"content": f"[Scheduled] {job.prompt}",
-					})
-					print(f"\033[36m[Cron] Delivering {job.id}: {job.prompt}\033[0m")
-				# Run agent loop with the injected messages
-				try:
-					result = _agent_ref.agent_loop(_history_ref)
-					# Show the final response (the main loop won't print it —
-					# it's still blocked at input()).
-					if result:
-						print(f"\n{result}\n")
-					# Success: remove completed one-shot jobs, reset recurring
-					for job in fired:
-						if not job.recurring:
-							_cron_store.remove(job.id)
-						else:
-							job.pending_delivery = False
-							if job.durable:
-								_cron_store.save()
-				except Exception as e:
-					# Failure: rollback — remove injected messages, keep pending
-					print(f"\033[31m[Cron] Delivery failed: {e}. Will retry.\033[0m")
-					for job in fired:
-						job.pending_delivery = True
-						# Remove the injected message
-						for i in range(len(_history_ref) - 1, -1, -1):
-							if _history_ref[i].get("content") == f"[Scheduled] {job.prompt}":
-								_history_ref.pop(i)
-								break
-		finally:
-			CRON_TURN = False
-			agent_lock.release()
-			# Re-print the input prompt so the user knows they can type again.
-			# The main thread is blocked at input() whose prompt was already
-			# printed — our output above moved the cursor, so re-show it.
-			print("\033[36m>> \033[0m", end="", flush=True)
+			accepted = _delivery_handler(content)
+		except Exception as exc:
+			accepted = False
+			_emit_status(
+				f"\033[31m[Cron] Delivery failed: {exc}. Will retry.\033[0m"
+			)
+
+		if not accepted:
+			_restore_delivery_queue(fired)
+			stop_event.wait(QUEUE_POLL_INTERVAL)
+			continue
+
+		for job in fired:
+			if not job.recurring:
+				_cron_store.remove(job.id)
+			else:
+				job.pending_delivery = False
+				if job.durable:
+					_cron_store.save()
 		stop_event.wait(QUEUE_POLL_INTERVAL)
 
 
@@ -337,15 +319,19 @@ _scheduler_thread: threading.Thread | None = None
 _processor_thread: threading.Thread | None = None
 
 
-def start(agent=None, history: list | None = None) -> None:
+def start(
+	delivery_handler: Callable[[str], bool],
+	status_handler: Callable[[str], None] | None = None,
+) -> None:
 	"""Initialize and start the cron scheduler threads."""
-	global _cron_store, _scheduler_thread, _processor_thread, _agent_ref, _history_ref
+	global _cron_store, _scheduler_thread, _processor_thread
+	global _delivery_handler, _status_handler
+
+	_delivery_handler = delivery_handler
+	_status_handler = status_handler
 
 	_cron_store = CronStore()
 	_cron_store.load()
-
-	_agent_ref = agent
-	_history_ref = history
 
 	RUNTIME_STOP.clear()
 
@@ -361,24 +347,18 @@ def start(agent=None, history: list | None = None) -> None:
 	)
 	_scheduler_thread.start()
 	_processor_thread.start()
-	print("\033[36m[Cron] Scheduler started\033[0m")
+	_emit_status("\033[36m[Cron] Scheduler started\033[0m")
 
 
 def stop() -> None:
 	"""Signal scheduler threads to stop."""
 	RUNTIME_STOP.set()
-	print("\033[36m[Cron] Scheduler stopped\033[0m")
+	_emit_status("\033[36m[Cron] Scheduler stopped\033[0m")
 
 
 def get_store() -> CronStore | None:
 	"""Return the cron store (for tool handlers to access)."""
 	return _cron_store
-
-
-def set_history_ref(history: list) -> None:
-	"""Update the history reference (called when history is created/reset)."""
-	global _history_ref
-	_history_ref = history
 
 
 # ── Cron Tools (schema + handler, owned by the cron module) ──

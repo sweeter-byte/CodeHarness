@@ -1,5 +1,8 @@
 """Application runtime and composition root for CodeHarness."""
 
+import threading
+from collections.abc import Callable
+
 from openai import OpenAI
 
 import cron_scheduler
@@ -38,6 +41,9 @@ class CodeHarness:
         self.history = None
         self.approval_handler = None
         self.status_handler = None
+        self.async_result_handler: Callable[[str], None] | None = None
+        self._turn_lock = threading.Lock()
+        self._user_turn_pending = threading.Event()
         self._started = False
         self._closed = False
         self._cron_started = False
@@ -56,6 +62,11 @@ class CodeHarness:
         self.status_handler = handler
         if self.agent is not None:
             self.agent.status_handler = handler
+
+    def set_async_result_handler(
+        self, handler: Callable[[str], None] | None
+    ) -> None:
+        self.async_result_handler = handler
 
     def _emit_status(self, message: str) -> None:
         if self.status_handler is not None:
@@ -123,9 +134,15 @@ class CodeHarness:
         )
         self.history = []
 
-        cron_scheduler.start(agent=self.agent, history=self.history)
+        cron_scheduler.start(
+            delivery_handler=self._try_deliver_async,
+            status_handler=self._emit_status,
+        )
         self._cron_started = True
-        team_wakeup.start(agent=self.agent, history=self.history)
+        team_wakeup.start(
+            delivery_handler=self._try_deliver_async,
+            status_handler=self._emit_status,
+        )
         self._team_wakeup_started = True
         self._started = True
         return self
@@ -133,50 +150,83 @@ class CodeHarness:
     def run(self, query: str) -> str:
         """Run one user turn while serializing access to shared history."""
         self._require_started()
-        cron_scheduler.UI_BUSY = True
+        self._user_turn_pending.set()
         acquired = False
         try:
-            trigger_hooks("UserPromptSubmit", query)
             while not acquired:
-                acquired = cron_scheduler.agent_lock.acquire(timeout=1)
+                acquired = self._turn_lock.acquire(timeout=1)
                 if not acquired:
                     self._emit_status(
-                        "\033[33m[Wait] A scheduled task is running, waiting...\033[0m"
+                        "\033[33m[Wait] A scheduled/background turn is "
+                        "running, waiting...\033[0m"
                     )
-            cron_scheduler.UI_BUSY = False
+            self._user_turn_pending.clear()
+            trigger_hooks("UserPromptSubmit", query)
             self.history.append({"role": "user", "content": query})
+            return self._run_agent_turn(interactive_approval=True)
+        finally:
+            self._user_turn_pending.clear()
+            if acquired:
+                self._turn_lock.release()
+
+    def _try_deliver_async(self, content: str) -> bool:
+        """Deliver one background event without waiting for the leader turn."""
+        self._require_started()
+        if self._user_turn_pending.is_set():
+            return False
+        if not self._turn_lock.acquire(blocking=False):
+            return False
+
+        injected = {"role": "user", "content": content}
+        try:
+            # Close the race where a user turn becomes pending between the
+            # first check and this non-blocking lock acquisition.
+            if self._user_turn_pending.is_set():
+                return False
+            self.history.append(injected)
+            try:
+                result = self._run_agent_turn(interactive_approval=False)
+            except Exception:
+                self._remove_injected_message(injected)
+                raise
+            if result and self.async_result_handler is not None:
+                self.async_result_handler(result)
+            return True
+        finally:
+            self._turn_lock.release()
+
+    def _run_agent_turn(self, *, interactive_approval: bool) -> str:
+        previous = hooks.INTERACTIVE_APPROVAL_ALLOWED.value
+        hooks.INTERACTIVE_APPROVAL_ALLOWED.value = interactive_approval
+        try:
             return self.agent.agent_loop(self.history)
         finally:
-            cron_scheduler.UI_BUSY = False
-            if acquired:
-                cron_scheduler.agent_lock.release()
+            hooks.INTERACTIVE_APPROVAL_ALLOWED.value = previous
+
+    def _remove_injected_message(self, injected: dict) -> None:
+        """Best-effort removal of the user event for a failed async turn."""
+        for index in range(len(self.history) - 1, -1, -1):
+            if self.history[index] is injected:
+                self.history.pop(index)
+                return
 
     def context_info(self) -> str:
         self._require_started()
-        cron_scheduler.UI_BUSY = True
-        try:
+        with self._turn_lock:
             return self.agent.context_manager.get_observability_report(self.history)
-        finally:
-            cron_scheduler.UI_BUSY = False
 
     def compact(self) -> str:
         self._require_started()
-        cron_scheduler.UI_BUSY = True
-        try:
+        with self._turn_lock:
             self.history[:] = self.agent.context_manager.compact_history(self.history)
             return "✓ Context compacted."
-        finally:
-            cron_scheduler.UI_BUSY = False
 
     def clear(self) -> str:
         self._require_started()
-        cron_scheduler.UI_BUSY = True
-        try:
+        with self._turn_lock:
             self.history.clear()
             self.agent.context_manager.set_active_request("")
             return "✓ Context cleared."
-        finally:
-            cron_scheduler.UI_BUSY = False
 
     def close(self) -> None:
         """Close background services and external resources in legacy order."""
