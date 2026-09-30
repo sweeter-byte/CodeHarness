@@ -19,6 +19,7 @@ from pathlib import Path
 SCHEDULED_TASKS_FILE = Path(".scheduled_tasks.json")
 POLL_INTERVAL = 1.0       # Scheduler polls every 1 second
 QUEUE_POLL_INTERVAL = 0.2 # Queue processor checks every 200ms
+STOP_JOIN_TIMEOUT = 2.0   # Bound for joining scheduler/processor threads on stop
 
 # Global stop event for graceful shutdown.
 RUNTIME_STOP = threading.Event()
@@ -351,9 +352,35 @@ def start(
 
 
 def stop() -> None:
-	"""Signal scheduler threads to stop."""
+	"""Stop scheduler threads and release Runtime-owned references.
+
+	Signals the stop event, joins both threads with a bounded timeout (never
+	waits forever — a delivery in progress may outlive the join), clears the
+	in-memory delivery queue, and drops the handler / store references so a
+	later cron tool call reports "scheduler not initialized". Durable jobs
+	stay on disk and are reloaded by the next start().
+	"""
+	global _scheduler_thread, _processor_thread, _cron_store
+	global _delivery_handler, _status_handler
+
 	RUNTIME_STOP.set()
+
+	current = threading.current_thread()
+	for thread in (_scheduler_thread, _processor_thread):
+		if thread is not None and thread is not current:
+			thread.join(timeout=STOP_JOIN_TIMEOUT)
+	_scheduler_thread = None
+	_processor_thread = None
+
+	# In-memory queue is transient; durable jobs are already persisted.
+	with _delivery_lock:
+		_delivery_queue.clear()
+
 	_emit_status("\033[36m[Cron] Scheduler stopped\033[0m")
+
+	_delivery_handler = None
+	_status_handler = None
+	_cron_store = None
 
 
 def get_store() -> CronStore | None:

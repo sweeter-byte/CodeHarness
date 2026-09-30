@@ -3,14 +3,13 @@ import os
 from collections.abc import Callable
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
-from codeharness.tools.todo import TODO as DEFAULT_TODO
 from codeharness import hooks
-from codeharness.hooks import SESSION_STATS, trigger_hooks
+from codeharness.hooks import new_session_stats, trigger_hooks
 from codeharness.context.budget import ContextBudget
 from codeharness.context.token_counter import TokenCounter
 from codeharness.context.manager import ContextManager
 from codeharness.memory import MemoryManager
-from codeharness.background import BACKGROUND, BackgroundManager, should_run_background
+from codeharness.background import BackgroundManager, should_run_background
 from codeharness.core.prompt import build_default_system_prompt
 from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
 
@@ -20,13 +19,6 @@ TODO_TOOL_NAME = "todo_write"
 TODO_REMINDER_ROUNDS = 3
 MAX_REACTIVE_RETRIES = 1
 
-# Default tool set for an Agent constructed without explicit tools/handlers
-# (the leader Runtime path passes its fully-assembled registry snapshot instead).
-# These are per-module snapshots, never a shared mutable pool.
-_BASE_REGISTRY = build_base_registry()
-DEFAULT_TOOLS = _BASE_REGISTRY.schemas
-DEFAULT_HANDLERS = _BASE_REGISTRY.handlers
-
 
 class Agent:
     def __init__(self, system: str = None, tools: list = None,
@@ -34,6 +26,7 @@ class Agent:
                  todo_manager: TodoManager = None,
                  memory_manager: MemoryManager = None,
                  background_manager: BackgroundManager = None,
+                 session_stats: dict = None,
                  interactive: bool = True,
                  client=None,
                  model: str = None,
@@ -74,12 +67,27 @@ class Agent:
 
         memory_block = self.memory_manager.load_relevant([]) if self.memory_manager else ""
         self.system = base_system + memory_block if memory_block else base_system
-        self.tools = tools if tools is not None else list(DEFAULT_TOOLS)
-        self.handlers = handlers if handlers is not None else dict(DEFAULT_HANDLERS)
-        self.max_rounds = max_rounds
-        self.todo_manager = todo_manager if todo_manager is not None else DEFAULT_TODO
+
+        # ── Per-instance mutable state ──
+        # Never a process-global default: each Agent owns its TodoManager,
+        # BackgroundManager and (unless shared by a Runtime) session stats.
+        self.todo_manager = todo_manager if todo_manager is not None else TodoManager()
         self.background_manager = background_manager if background_manager is not None \
-            else BACKGROUND
+            else BackgroundManager()
+        self.session_stats = session_stats if session_stats is not None \
+            else new_session_stats()
+
+        # When no explicit tool set is supplied, build a fresh registry bound
+        # to THIS Agent's TodoManager so todo_write and self.todo_manager share
+        # state. Explicit tools/handlers (the leader Runtime path) are kept as-is.
+        if tools is None or handlers is None:
+            registry = build_base_registry(todo_manager=self.todo_manager)
+            self.tools = tools if tools is not None else registry.schemas
+            self.handlers = handlers if handlers is not None else registry.handlers
+        else:
+            self.tools = tools
+            self.handlers = handlers
+        self.max_rounds = max_rounds
 
         # ── Context Management ──
         self.token_counter = TokenCounter()
@@ -103,11 +111,11 @@ class Agent:
             self.status_handler(message)
 
     def _accumulate_tokens(self, response):
-        """Add token usage from an LLM response to SESSION_STATS."""
+        """Add token usage from an LLM response to this Agent's session stats."""
         if response.usage:
-            SESSION_STATS["prompt_tokens"] += response.usage.prompt_tokens
-            SESSION_STATS["completion_tokens"] += response.usage.completion_tokens
-            SESSION_STATS["total_tokens"] += response.usage.total_tokens
+            self.session_stats["prompt_tokens"] += response.usage.prompt_tokens
+            self.session_stats["completion_tokens"] += response.usage.completion_tokens
+            self.session_stats["total_tokens"] += response.usage.total_tokens
 
     def _call_llm(self, messages: list):
         """Single LLM call; accumulates tokens automatically."""
@@ -201,7 +209,7 @@ class Agent:
 
         # ── PostToolUse ──
         if executed:
-            SESSION_STATS["tool_calls"] += 1
+            self.session_stats["tool_calls"] += 1
             trigger_hooks("PostToolUse", tool_name, args, output)
 
         messages.append({

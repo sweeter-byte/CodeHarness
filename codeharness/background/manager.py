@@ -225,5 +225,5 @@ class BackgroundManager:
 			]
 
 
-# Module-level singleton — used as the default for the main Agent.
-BACKGROUND = BackgroundManager()
+# No process-global default: every Agent creates its own BackgroundManager
+# so background results are never routed across runtimes or conversations.

@@ -29,13 +29,18 @@ def trigger_hooks(event: str, *args):
 
 # ── Shared State ──────────────────────────────────────────────
 
-# Token / tool-call counters, accumulated by the agent loop each turn.
-SESSION_STATS = {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_tokens": 0,
-    "tool_calls": 0,
-}
+# Token / tool-call counters are owned by a CodeHarness Runtime, not by this
+# module. A Runtime creates one dict via new_session_stats() and shares it
+# with every Agent it spawns (leader / subagent / teammate); two Runtimes in
+# the same process never share statistics.
+def new_session_stats() -> dict:
+    """Return a fresh, zeroed session-stats dict owned by one Runtime."""
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "tool_calls": 0,
+    }
 
 # Set by permission_hook when the decision is "ask"; read & cleared by the loop.
 # Thread-local: the leader and teammate threads run tool calls concurrently;
@@ -58,6 +63,18 @@ INTERACTIVE_APPROVAL_ALLOWED = _InteractiveApprovalLocal()
 _perm_manager = PermissionManager()
 
 
+def configure_permissions(allowed_dirs):
+    """Re-root the shared PermissionManager at the Runtime workspace.
+
+    Called by CodeHarness.start() so the native-tool permission boundary
+    follows RuntimeConfig.workspace instead of the import-time os.getcwd().
+    The dependency stays Runtime → Permission; permission.py never imports
+    the runtime config itself.
+    """
+    global _perm_manager
+    _perm_manager = PermissionManager(allowed_dirs=[str(d) for d in allowed_dirs])
+
+
 def configure_mcp_permissions(resolve, annotations_of=None):
     """Inject MCP name-resolution into the shared PermissionManager.
 
@@ -66,6 +83,15 @@ def configure_mcp_permissions(resolve, annotations_of=None):
     Called once at startup after the MCP tool pool has been assembled.
     """
     _perm_manager.set_mcp_provider(resolve, annotations_of)
+
+
+def clear_mcp_permissions():
+    """Drop the MCP provider callables (called on Runtime close).
+
+    Prevents the PermissionManager from keeping MCPManager bound methods
+    alive after the runtime that owned them has shut down.
+    """
+    _perm_manager.set_mcp_provider(None, None)
 
 # ── UserPromptSubmit Hook ─────────────────────────────────────
 

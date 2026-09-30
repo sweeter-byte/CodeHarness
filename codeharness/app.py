@@ -6,7 +6,7 @@ from collections.abc import Callable
 from openai import OpenAI
 
 from codeharness import hooks
-from codeharness.hooks import SESSION_STATS, trigger_hooks
+from codeharness.hooks import new_session_stats, trigger_hooks
 from codeharness.scheduler import cron
 from codeharness.subagent import (
     TASK_HANDLERS as SUB_TASK_HANDLERS,
@@ -19,14 +19,14 @@ from codeharness.team import wakeup as team_wakeup
 
 from codeharness.config import RuntimeConfig
 from codeharness.core.agent import Agent
+from codeharness.background import BackgroundManager
 from codeharness.mcp import (
     MCPConfigError,
     MCPManager,
     load_config,
     shutdown_runtime,
 )
-from codeharness.tools import build_base_registry
-from codeharness.tools.todo import TODO as DEFAULT_TODO
+from codeharness.tools import build_base_registry, TodoManager
 
 
 class CodeHarness:
@@ -42,6 +42,10 @@ class CodeHarness:
         self.approval_handler = None
         self.status_handler = None
         self.async_result_handler: Callable[[str], None] | None = None
+        # Runtime-owned mutable state: never shared with another Runtime.
+        self.todo_manager = None
+        self.background_manager = None
+        self.session_stats = new_session_stats()
         self._turn_lock = threading.Lock()
         self._user_turn_pending = threading.Event()
         self._started = False
@@ -83,6 +87,7 @@ class CodeHarness:
             "workspace": str(self.config.workspace),
             "approval_handler": self.approval_handler,
             "status_handler": self.status_handler,
+            "session_stats": self.session_stats,
         }
         defaults.update(kwargs)
         return Agent(**defaults)
@@ -98,10 +103,17 @@ class CodeHarness:
             api_key=self.config.api_key,
             base_url=self.config.base_url,
         )
+        # Root native-tool permissions at the configured workspace, not at
+        # the import-time cwd. Dependency direction stays Runtime → Permission.
+        hooks.configure_permissions([str(self.config.workspace)])
         configure_subagent_agent_factory(self.create_agent)
         TEAM.set_agent_factory(self.create_agent)
 
-        registry = build_base_registry()
+        # Runtime-owned mutable state for the leader.
+        self.todo_manager = TodoManager()
+        self.background_manager = BackgroundManager()
+
+        registry = build_base_registry(todo_manager=self.todo_manager)
         registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
         registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
@@ -130,7 +142,8 @@ class CodeHarness:
         self.agent = self.create_agent(
             tools=registry.schemas,
             handlers=registry.handlers,
-            todo_manager=DEFAULT_TODO,
+            todo_manager=self.todo_manager,
+            background_manager=self.background_manager,
         )
         self.history = []
 
@@ -241,27 +254,92 @@ class CodeHarness:
             self.agent.context_manager.set_active_request("")
             return "✓ Context cleared."
 
+    def _clear_callbacks(self) -> None:
+        """Drop interface callbacks once the lifecycle has fully ended.
+
+        Runs LAST: the Stop hook and shutdown steps may still emit status,
+        so the handlers must stay reachable until everything else is done.
+        """
+        self.approval_handler = None
+        self.status_handler = None
+        self.async_result_handler = None
+        if self.agent is not None:
+            self.agent.approval_handler = None
+            self.agent.status_handler = None
+
     def close(self) -> None:
-        """Close background services and external resources in legacy order."""
+        """Release Runtime-owned state and external resources.
+
+        Every step is guarded so a failure in one cleanup action never
+        prevents the remaining ones from running: start() may have failed
+        partway (partial MCP connect, cron up but wakeup down, ...), so
+        close() must be safe regardless of how far start() got.
+        """
         if self._closed:
             return
+
+        # 1. stop Team Wakeup
         try:
             if self._team_wakeup_started:
                 team_wakeup.stop()
-                self._team_wakeup_started = False
+        except Exception:
+            pass
+        finally:
+            self._team_wakeup_started = False
+
+        # 2. stop Cron
+        try:
             if self._cron_started:
                 cron.stop()
-                self._cron_started = False
-            if self._started:
-                trigger_hooks("Stop", SESSION_STATS)
+        except Exception:
+            pass
         finally:
-            try:
-                if self.mcp_manager is not None:
-                    self.mcp_manager.close_all()
-            finally:
-                shutdown_runtime()
-                self._started = False
-                self._closed = True
+            self._cron_started = False
+
+        # 3. Stop Hook / Session Summary (Runtime-owned stats)
+        try:
+            if self._started:
+                trigger_hooks("Stop", self.session_stats)
+        except Exception:
+            pass
+
+        # 4. clear SubAgent factory
+        try:
+            configure_subagent_agent_factory(None)
+        except Exception:
+            pass
+
+        # 5. clear Team agent factory
+        try:
+            TEAM.set_agent_factory(None)
+        except Exception:
+            pass
+
+        # 6. clear MCP permission provider
+        try:
+            hooks.clear_mcp_permissions()
+        except Exception:
+            pass
+
+        # 7. close MCP adapters
+        try:
+            if self.mcp_manager is not None:
+                self.mcp_manager.close_all()
+        except Exception:
+            pass
+
+        # 8. shutdown MCP runtime
+        try:
+            shutdown_runtime()
+        except Exception:
+            pass
+
+        # 9. clear Runtime callbacks (last: shutdown may still emit status)
+        self._clear_callbacks()
+
+        # 10. mark closed
+        self._started = False
+        self._closed = True
 
     def _require_started(self) -> None:
         if not self._started or self.agent is None or self.history is None:

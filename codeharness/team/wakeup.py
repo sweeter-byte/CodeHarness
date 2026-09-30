@@ -16,6 +16,7 @@ from codeharness.team.bus import BUS, LEADER
 from codeharness.team import protocol
 
 WAKEUP_POLL_INTERVAL = 0.5  # seconds; also the wait_for_messages timeout
+STOP_JOIN_TIMEOUT = 2.0     # bound for joining the wakeup thread on stop
 
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
@@ -44,7 +45,21 @@ def start(
 
 
 def stop() -> None:
+	"""Stop the wakeup thread and release its Runtime-owned references.
+
+	Sets the stop event, joins the thread with a bounded timeout (skipping a
+	self-join when called from the wakeup thread itself), then clears the
+	thread and status-handler references. The delivery_handler is held only
+	through the thread args, so it is released once the thread exits.
+	"""
+	global _thread, _status_handler
 	_stop_event.set()
+	current = threading.current_thread()
+	if _thread is not None and _thread is not current:
+		_thread.join(timeout=STOP_JOIN_TIMEOUT)
+	_thread = None
+	_emit_status("\033[36m[team] wakeup thread stopped\033[0m")
+	_status_handler = None
 
 
 def _wakeup_loop(delivery_handler: Callable[[str], bool]) -> None:

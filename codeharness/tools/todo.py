@@ -2,8 +2,8 @@
 
 Migrated verbatim from the legacy root tools.py (Phase 2); the TODO system
 is NOT redesigned here. TodoManager instances are per-agent (leader,
-subagents and teammates each own one); the module-level ``TODO`` default
-preserves the legacy leader behaviour.
+subagents and teammates each own one); there is no process-global default
+— every registry / Agent creates its own TodoManager.
 """
 
 import json
@@ -104,18 +104,6 @@ class TodoManager:
         self.items = []
 
 
-# Default instance: preserves the legacy leader behaviour (the leader's
-# Agent uses it when no explicit todo_manager is supplied). Subagents and
-# teammates always create their own instances.
-TODO = TodoManager()
-
-
-def run_todo_write(todos: list | str) -> str:
-    output = TODO.update(todos)
-    print(output)
-    return output
-
-
 def make_todo_handler(manager: TodoManager):
     """Build a todo_write handler bound to a per-agent TodoManager instance."""
     def handler(todos: list | str) -> str:
@@ -123,8 +111,3 @@ def make_todo_handler(manager: TodoManager):
         print(output)
         return output
     return handler
-
-
-TODO_HANDLERS = {
-    "todo_write": run_todo_write,
-}
