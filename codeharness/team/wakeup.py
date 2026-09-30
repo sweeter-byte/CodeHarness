@@ -12,8 +12,8 @@ LLM: they are runtime bookkeeping, not model input.
 import threading
 from collections.abc import Callable
 
-from team.bus import BUS, LEADER
-from team import protocol
+from codeharness.team.bus import BUS, LEADER
+from codeharness.team import protocol
 
 WAKEUP_POLL_INTERVAL = 0.5  # seconds; also the wait_for_messages timeout
 

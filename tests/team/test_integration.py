@@ -1,6 +1,6 @@
 """Integration test for the team runtime with a FakeAgent stand-in.
 
-Run: python3 team/test_integration.py
+Run: python3 tests/team/test_integration.py
 
 Covers, without any LLM calls:
   1. spawn: claim-before-start; spawn on a claimed task refused
@@ -27,10 +27,10 @@ import tempfile
 import threading
 import time
 
-# Repo root on sys.path (this script lives inside team/)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Repo root on sys.path (this script lives inside tests/team/)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Isolated workspace BEFORE importing task_system/team (singletons use
+# Isolated workspace BEFORE importing codeharness.tasks/codeharness.team (singletons use
 # relative paths resolved against the process cwd).
 TMP = tempfile.mkdtemp(prefix="team_test_")
 os.chdir(TMP)
@@ -91,11 +91,11 @@ def wait_for(predicate, timeout=10.0, what="condition"):
 
 
 def main():
-	import team  # noqa: F401  (registers everything)
-	from team import TEAM, BUS, LEADER
+	import codeharness.team  # noqa: F401  (registers everything)
+	from codeharness.team import TEAM, BUS, LEADER
 	TEAM.set_agent_factory(FakeAgent)
-	from task_system import TASKS
-	from team import tools as team_tools
+	from codeharness.tasks import TASKS
+	from codeharness.team import tools as team_tools
 
 	# Buffer for inbox messages not matching the waited type yet.
 	pending: list[dict] = []

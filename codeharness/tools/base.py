@@ -19,11 +19,11 @@ from codeharness.tools.todo import TODO_HANDLERS, TODO_TOOLS
 def build_base_registry() -> ToolRegistry:
     """Assemble a fresh registry with the base tool set.
 
-    The cron module still lives at the repo root (cron_scheduler.py); the
+    The cron scheduler lives in codeharness/scheduler/cron.py; the
     import is deferred so importing this package never pulls the scheduler
     in as a side effect.
     """
-    from cron_scheduler import CRON_HANDLERS, CRON_TOOLS
+    from codeharness.scheduler.cron import CRON_HANDLERS, CRON_TOOLS
 
     registry = ToolRegistry()
     registry.extend(CODING_TOOLS, CODING_HANDLERS)

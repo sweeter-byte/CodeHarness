@@ -39,7 +39,7 @@ def test_base_registry_instances_are_independent():
 
 
 def test_subagent_tool_set_is_exactly_the_base_set():
-    import subagent
+    from codeharness import subagent
 
     assert _names(subagent.SUB_TOOLS) == BASE_TOOL_NAMES
     assert set(subagent.SUB_HANDLERS) == set(BASE_TOOL_NAMES)
@@ -48,7 +48,7 @@ def test_subagent_tool_set_is_exactly_the_base_set():
 
 
 def test_teammate_tool_set_visibility():
-    from team.teammate import TEAMMATE_TOOLS
+    from codeharness.team.teammate import TEAMMATE_TOOLS
 
     names = _names(TEAMMATE_TOOLS)
     # task-board order follows TASK_TOOLS declaration order (legacy behaviour)
@@ -70,9 +70,9 @@ def test_teammate_tool_set_visibility():
 
 def test_leader_registry_assembly_and_duplicate_rejection():
     """Mirror CodeHarness.start: base + task + task system + team + MCP."""
-    from subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
-    from task_system import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
-    from team.tools import TEAM_TOOLS, TEAM_HANDLERS
+    from codeharness.subagent import TASK_TOOL, TASK_HANDLERS as SUB_TASK_HANDLERS
+    from codeharness.tasks import TASK_TOOLS, TASK_HANDLERS as TASK_SYS_HANDLERS
+    from codeharness.team.tools import TEAM_TOOLS, TEAM_HANDLERS
 
     registry = build_base_registry()
     registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])

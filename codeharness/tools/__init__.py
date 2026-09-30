@@ -8,7 +8,7 @@ ToolRegistry aggregates them for an Agent:
 Tool adapters that belong to other capability modules live there:
   - load_skill    → codeharness/skills/tools.py
   - read_artifact → codeharness/context/tools.py
-  - cron_*        → cron_scheduler.py (moves with the scheduler later)
+  - cron_*        → codeharness/scheduler/cron.py
 """
 
 from codeharness.tools.registry import DuplicateToolError, ToolRegistry

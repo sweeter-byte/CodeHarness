@@ -171,9 +171,9 @@ def test_context_operations_share_runtime_turn_lock(tmp_path):
 
 
 def test_cron_has_only_callback_delivery_dependencies():
-    import cron_scheduler
+    from codeharness.scheduler import cron
 
-    source = inspect.getsource(cron_scheduler)
+    source = inspect.getsource(cron)
 
     for removed_name in (
         "_agent_ref",
@@ -199,61 +199,61 @@ class _OneIterationStop:
 
 @pytest.fixture
 def isolated_cron(monkeypatch, tmp_path):
-    import cron_scheduler
+    from codeharness.scheduler import cron
 
-    store = cron_scheduler.CronStore(tmp_path / "cron.json")
-    monkeypatch.setattr(cron_scheduler, "_cron_store", store)
-    monkeypatch.setattr(cron_scheduler, "_delivery_queue", [])
-    monkeypatch.setattr(cron_scheduler, "_status_handler", None, raising=False)
-    return cron_scheduler, store
+    store = cron.CronStore(tmp_path / "cron.json")
+    monkeypatch.setattr(cron, "_cron_store", store)
+    monkeypatch.setattr(cron, "_delivery_queue", [])
+    monkeypatch.setattr(cron, "_status_handler", None, raising=False)
+    return cron, store
 
 
 def test_cron_keeps_job_queued_when_runtime_is_busy(monkeypatch, isolated_cron):
-    cron_scheduler, store = isolated_cron
-    job = cron_scheduler.CronJob("one", "* * * * *", "work", False, False, True)
+    cron, store = isolated_cron
+    job = cron.CronJob("one", "* * * * *", "work", False, False, True)
     store.jobs[job.id] = job
-    cron_scheduler._delivery_queue.append(job)
+    cron._delivery_queue.append(job)
     calls = []
     monkeypatch.setattr(
-        cron_scheduler,
+        cron,
         "_delivery_handler",
         lambda content: calls.append(content) or False,
         raising=False,
     )
 
-    cron_scheduler._queue_processor_loop(_OneIterationStop())
+    cron._queue_processor_loop(_OneIterationStop())
 
     assert calls == ["[Scheduled] work"]
-    assert cron_scheduler._delivery_queue == [job]
+    assert cron._delivery_queue == [job]
     assert job.pending_delivery is True
 
 
 def test_cron_success_preserves_one_shot_and_recurring_semantics(
     monkeypatch, isolated_cron
 ):
-    cron_scheduler, store = isolated_cron
-    one_shot = cron_scheduler.CronJob(
+    cron, store = isolated_cron
+    one_shot = cron.CronJob(
         "one", "* * * * *", "once", False, False, True
     )
-    recurring = cron_scheduler.CronJob(
+    recurring = cron.CronJob(
         "repeat", "* * * * *", "again", True, False, True
     )
     store.jobs = {one_shot.id: one_shot, recurring.id: recurring}
-    cron_scheduler._delivery_queue.extend([one_shot, recurring])
+    cron._delivery_queue.extend([one_shot, recurring])
     delivered = []
     monkeypatch.setattr(
-        cron_scheduler,
+        cron,
         "_delivery_handler",
         lambda content: delivered.append(content) or True,
         raising=False,
     )
 
-    cron_scheduler._queue_processor_loop(_OneIterationStop())
+    cron._queue_processor_loop(_OneIterationStop())
 
     assert delivered == ["[Scheduled] once\n[Scheduled] again"]
     assert one_shot.id not in store.jobs
     assert recurring.pending_delivery is False
-    assert cron_scheduler._delivery_queue == []
+    assert cron._delivery_queue == []
 
 
 def _team_message():
@@ -267,18 +267,18 @@ def _team_message():
 
 
 def test_team_wakeup_has_no_cron_agent_history_or_terminal_dependency():
-    from team import wakeup
+    from codeharness.team import wakeup
 
     source = inspect.getsource(wakeup)
 
-    assert "import cron_scheduler" not in source
+    assert "from codeharness.scheduler import cron" not in source
     assert "agent_loop" not in source
     assert "history" not in source
     assert "print(" not in source
 
 
 def test_team_wakeup_retries_buffered_event_after_runtime_busy(monkeypatch):
-    from team import wakeup
+    from codeharness.team import wakeup
 
     waits = 0
 
@@ -302,7 +302,7 @@ def test_team_wakeup_retries_buffered_event_after_runtime_busy(monkeypatch):
 
 
 def test_team_wakeup_clears_buffer_only_after_delivery_success(monkeypatch):
-    from team import wakeup
+    from codeharness.team import wakeup
 
     waits = 0
 
@@ -323,7 +323,7 @@ def test_team_wakeup_clears_buffer_only_after_delivery_success(monkeypatch):
 def test_permission_hook_blocks_background_approval_without_cron_dependency(
     monkeypatch,
 ):
-    import hooks
+    from codeharness import hooks
 
     monkeypatch.setattr(
         hooks._perm_manager,
@@ -339,14 +339,14 @@ def test_permission_hook_blocks_background_approval_without_cron_dependency(
 
     assert "Interactive approval not available during background execution" in result
     assert hooks.PENDING_USER_ASK.value is None
-    assert "cron_scheduler" not in inspect.getsource(hooks.permission_hook)
+    assert "scheduler" not in inspect.getsource(hooks.permission_hook)
 
 
 def test_background_turn_subagent_inherits_non_interactive_approval_context(
     monkeypatch, tmp_path
 ):
-    import hooks
-    import subagent
+    from codeharness import hooks
+    from codeharness import subagent
 
     monkeypatch.setattr(
         hooks._perm_manager,
@@ -462,7 +462,7 @@ def test_presentation_failure_with_failing_status_handler_still_succeeds(tmp_pat
 def test_cron_does_not_requeue_job_after_interface_presentation_failure(
     monkeypatch, isolated_cron, tmp_path
 ):
-    cron_scheduler, store = isolated_cron
+    cron, store = isolated_cron
     harness = _runtime(tmp_path)
     harness.agent = _ImmediateAgent(result="answer")
 
@@ -470,26 +470,26 @@ def test_cron_does_not_requeue_job_after_interface_presentation_failure(
         raise RuntimeError("ui broke")
 
     harness.set_async_result_handler(failing_presentation)
-    job = cron_scheduler.CronJob("one", "* * * * *", "work", False, False, True)
+    job = cron.CronJob("one", "* * * * *", "work", False, False, True)
     store.jobs[job.id] = job
-    cron_scheduler._delivery_queue.append(job)
+    cron._delivery_queue.append(job)
     monkeypatch.setattr(
-        cron_scheduler,
+        cron,
         "_delivery_handler",
         harness._try_deliver_async,
         raising=False,
     )
 
-    cron_scheduler._queue_processor_loop(_OneIterationStop())
+    cron._queue_processor_loop(_OneIterationStop())
 
     # The event reached the agent exactly once and is not queued again.
     assert [m for m in harness.history if "[Scheduled] work" in m["content"]]
     assert job.id not in store.jobs
-    assert cron_scheduler._delivery_queue == []
+    assert cron._delivery_queue == []
 
 
 def test_team_wakeup_clears_buffer_after_presentation_failure(monkeypatch, tmp_path):
-    from team import wakeup
+    from codeharness.team import wakeup
 
     harness = _runtime(tmp_path)
     harness.agent = _ImmediateAgent(result="answer")
@@ -518,10 +518,10 @@ def test_team_wakeup_clears_buffer_after_presentation_failure(monkeypatch, tmp_p
 
 
 def test_backend_files_do_not_contain_cli_prompt():
-    import cron_scheduler
+    from codeharness.scheduler import cron
     from codeharness import app as app_module
     from codeharness.core import agent as agent_module
-    from team import wakeup
+    from codeharness.team import wakeup
 
-    for module in (cron_scheduler, wakeup, app_module, agent_module):
+    for module in (cron, wakeup, app_module, agent_module):
         assert '">> "' not in inspect.getsource(module)

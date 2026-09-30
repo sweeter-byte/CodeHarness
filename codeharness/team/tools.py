@@ -1,15 +1,15 @@
 """Leader-side team tools: lifecycle, worktree management, messaging, approval.
 
-Schema + handler pairs follow the task_system.py convention; CodeHarness Runtime's
+Schema + handler pairs follow the codeharness/tasks/tools.py convention; CodeHarness Runtime's
 __main__ registers TEAM_TOOLS / TEAM_HANDLERS into the leader's
 ToolRegistry. Teammates never see these — their tool set is built from the
 base tool registry in teammate.py.
 """
 
-from team.bus import BUS, LEADER
-from team import protocol
-from team.manager import TEAM
-from team.worktree import create_worktree, remove_worktree
+from codeharness.team.bus import BUS, LEADER
+from codeharness.team import protocol
+from codeharness.team.manager import TEAM
+from codeharness.team.worktree import create_worktree, remove_worktree
 
 
 # ── Handlers ──────────────────────────────────────────────────

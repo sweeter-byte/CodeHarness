@@ -100,7 +100,7 @@ CodeHarness/
 │   └── manager.py          # ContextManager 主入口，串联所有 Layer
 ├── core/agent.py           # Agent Loop Core：集成 ContextManager
 ├── tools.py                # 改造：新增 read_artifact 工具
-├── hooks.py                # 改造：新增 Context Observability hook
+├── codeharness/hooks.py    # 改造：新增 Context Observability hook
 └── ...
 ```
 
@@ -136,7 +136,7 @@ TokenCounter  .artifacts/       └── Checkpoint
 | Trigger              | 触发方式                                        | 实现位置                                    |
 | -------------------- | ------------------------------------------- | --------------------------------------- |
 | **Auto Trigger**     | 当前窗口的token数超出预设阈值时 | `ContextManager.prepare()`              |
-| **Manual Trigger**   | 用户输入 `/compact`                             | `hooks.py` 的 `UserPromptSubmit` hook 拦截 |
+| **Manual Trigger**   | 用户输入 `/compact`                             | `codeharness/hooks.py` 的 `UserPromptSubmit` hook 拦截 |
 | **Model Trigger**    | 模型调用 `compact` 工具                     | agent_loop 中检测 tool_call                |
 | **Reactive Trigger** | API 返回 context overflow 异常                  | `_call_llm` 的 except 分支                 |
 | **Reset**            | 用户输入 `/clear`                               | 主循环中清空 history                          |
@@ -213,7 +213,7 @@ CronJob数据结构:
 ```python
 @dataclass
 class CronJob:
-    id: str              # "cron_" + 4字节hex，与 task_system 的 "task_" 前缀风格一致
+    id: str              # "cron_" + 4字节hex，与 Task System 的 "task_" 前缀风格一致
     cron: str            # 五段式 cron 表达式
     prompt: str          # 到期后交给 Agent 的任务描述
     recurring: bool      # True=周期性，False=一次性
@@ -278,7 +278,7 @@ CLI 退出（EOFError / KeyboardInterrupt / "q"）
 新增一套 Agent Team 运行机制：由Leader（主线程 Agent 实例）负责理解需求、拆分任务、协调进度，多个持久Teammate（守护线程 + 独立 Agent 实例）并行处理子任务，通过 MessageBus通信，共享Task System任务板，可选Git Worktree隔离工作目录。
 
 ```text
-team/
+codeharness/team/
 ├── __init__.py      # 包出口：TEAM_TOOLS / TEAM_HANDLERS / TEAMMATE_TOOLS / TeamManager
 │                    # import 时固化 TEAMMATE_TOOLS 过滤（早于 __main__ 的 TOOLS.extend）
 ├── bus.py           # MessageBus：.mailboxes/*.jsonl 读写、Condition 唤醒、wait_for_messages
@@ -290,7 +290,7 @@ team/
 ├── wakeup.py        # Leader 唤醒线程：消费 lead 收件箱、协议状态匹配、
 │                    # 注入 [Team events]、驱动 agent_loop
 ├── worktree.py      # Git worktree 创建 / 路径解析 / 安全清理（partial operation 处理）
-└── tools.py         # 工具 schema + handler 定义（对齐 task_system.py 惯例）
+└── tools.py         # 工具 schema + handler 定义（对齐 codeharness/tasks/tools.py 惯例）
 ```
 
 ### MessageBus

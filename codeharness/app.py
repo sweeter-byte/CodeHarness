@@ -5,17 +5,17 @@ from collections.abc import Callable
 
 from openai import OpenAI
 
-import cron_scheduler
-import hooks
-from hooks import SESSION_STATS, trigger_hooks
-from subagent import (
+from codeharness import hooks
+from codeharness.hooks import SESSION_STATS, trigger_hooks
+from codeharness.scheduler import cron
+from codeharness.subagent import (
     TASK_HANDLERS as SUB_TASK_HANDLERS,
     TASK_TOOL,
     configure_agent_factory as configure_subagent_agent_factory,
 )
-from task_system import TASK_HANDLERS as TASK_SYS_HANDLERS, TASK_TOOLS
-from team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
-from team import wakeup as team_wakeup
+from codeharness.tasks import TASK_HANDLERS as TASK_SYS_HANDLERS, TASK_TOOLS
+from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
+from codeharness.team import wakeup as team_wakeup
 
 from codeharness.config import RuntimeConfig
 from codeharness.core.agent import Agent
@@ -134,7 +134,7 @@ class CodeHarness:
         )
         self.history = []
 
-        cron_scheduler.start(
+        cron.start(
             delivery_handler=self._try_deliver_async,
             status_handler=self._emit_status,
         )
@@ -250,7 +250,7 @@ class CodeHarness:
                 team_wakeup.stop()
                 self._team_wakeup_started = False
             if self._cron_started:
-                cron_scheduler.stop()
+                cron.stop()
                 self._cron_started = False
             if self._started:
                 trigger_hooks("Stop", SESSION_STATS)

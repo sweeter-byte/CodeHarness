@@ -22,14 +22,14 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-from task_system import TASKS, TASK_TOOLS, TASK_HANDLERS
+from codeharness.tasks import TASKS, TASK_TOOLS, TASK_HANDLERS
 from codeharness.tools import (
 	build_base_registry, ToolRegistry, TodoManager, make_todo_handler,
 )
 from codeharness.skills.tools import SKILL_LOADER
-from team.bus import BUS, LEADER
-from team import protocol
-from team.protocol import (
+from codeharness.team.bus import BUS, LEADER
+from codeharness.team import protocol
+from codeharness.team.protocol import (
 	GATE_NOT_REQUIRED, GATE_PENDING, GATE_REQUIRED, GATE_APPROVED,
 	GATE_REJECTED, BLOCKING_GATES,
 )
@@ -195,7 +195,7 @@ def make_teammate_handlers(state: TeammateState) -> dict:
 	model cannot claim on behalf of someone else). todo_write binds to the
 	teammate's own TodoManager, same pattern as subagents.
 	"""
-	from team.worktree import resolve_worktree_cwd
+	from codeharness.team.worktree import resolve_worktree_cwd
 
 	handlers = dict(_TEAMMATE_BASE_HANDLERS)
 	handlers["todo_write"] = make_todo_handler(state.todo)
@@ -237,7 +237,7 @@ def make_teammate_handlers(state: TeammateState) -> dict:
 		return TASK_HANDLERS["complete_task"](task_id, owner=state.name)
 
 	def _send(to: str, content: str) -> str:
-		from team.manager import TEAM
+		from codeharness.team.manager import TEAM
 		if to == state.name:
 			return "Error: cannot send a message to yourself"
 		if to == LEADER or to in TEAM.teammate_names():
@@ -313,7 +313,7 @@ def teammate_main(state: TeammateState) -> None:
 		BUS.send(state.name, LEADER,
 				 f"Teammate {state.name} crashed: {e}.{recovered}", "message")
 	finally:
-		from team.manager import TEAM
+		from codeharness.team.manager import TEAM
 		TEAM._remove(state.name)
 		print(f"\033[35m[team:{state.name}] exited\033[0m")
 
@@ -354,7 +354,7 @@ def _idle_loop(state: TeammateState) -> str | None:
 	over auto-discovered tasks. While still assigned (plan pending), only
 	messages are considered — never auto-claim on top of an unfinished task.
 	"""
-	from team.worktree import resolve_worktree_cwd
+	from codeharness.team.worktree import resolve_worktree_cwd
 
 	while True:
 		timeout = None if state.assignment is not None else IDLE_SCAN_INTERVAL

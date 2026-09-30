@@ -9,11 +9,11 @@ handshake — the thread is never killed.
 
 import threading
 
-from task_system import TASKS, AGENT_NAMES
+from codeharness.tasks import TASKS, AGENT_NAMES
 from codeharness.background import BackgroundManager
-from team.bus import BUS, LEADER
-from team import protocol
-from team.teammate import (
+from codeharness.team.bus import BUS, LEADER
+from codeharness.team import protocol
+from codeharness.team.teammate import (
 	TeammateState, TEAMMATE_MAX_ROUNDS, TEAMMATE_TOOLS,
 	teammate_system, make_teammate_handlers, teammate_main,
 )
@@ -86,14 +86,14 @@ class TeamManager:
 
 		# Claim BEFORE starting the thread — a failed claim must not spawn
 		# a task-less teammate.
-		from team.worktree import resolve_worktree_cwd
+		from codeharness.team.worktree import resolve_worktree_cwd
 		task, cwd, error = TASKS.claim(
 			task_id, name, worktree_resolver=resolve_worktree_cwd)
 		if error:
 			return f"Error: cannot spawn '{name}': {error}"
 
 		state = TeammateState(name=name, require_plan=require_plan)
-		from team.teammate import _bind_task
+		from codeharness.team.teammate import _bind_task
 		_bind_task(state, task, cwd)
 		state.messages.append({
 			"role": "user",

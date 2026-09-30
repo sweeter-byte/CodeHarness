@@ -133,7 +133,7 @@ def test_status_handler_receives_agent_status(monkeypatch):
 
 
 def test_subagent_uses_configured_agent_factory(monkeypatch):
-    import subagent
+    from codeharness import subagent
 
     created = []
 
@@ -156,7 +156,7 @@ def test_subagent_uses_configured_agent_factory(monkeypatch):
 
 
 def test_subagent_without_factory_fails_loudly(monkeypatch):
-    import subagent
+    from codeharness import subagent
 
     monkeypatch.setattr(subagent, "_agent_factory", None, raising=False)
 
@@ -165,7 +165,7 @@ def test_subagent_without_factory_fails_loudly(monkeypatch):
 
 
 def test_team_manager_uses_configured_agent_factory(monkeypatch, tmp_path):
-    from team import manager as manager_module
+    from codeharness.team import manager as manager_module
 
     created = []
     task = SimpleNamespace(id="task_factory", subject="subject", description="desc")
@@ -201,7 +201,7 @@ def test_team_manager_uses_configured_agent_factory(monkeypatch, tmp_path):
 
 
 def test_team_manager_without_factory_fails_before_claim(monkeypatch):
-    from team import manager as manager_module
+    from codeharness.team import manager as manager_module
 
     manager = manager_module.TeamManager()
     claim_calls = []
@@ -346,6 +346,6 @@ def test_main_constructs_cli_once_before_start(monkeypatch):
 
 def test_runtime_uses_shared_team_manager_for_factory_configuration():
     from codeharness import app as app_module
-    from team import TEAM
+    from codeharness.team import TEAM
 
     assert app_module.TEAM is TEAM

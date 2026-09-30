@@ -4,8 +4,8 @@ from collections.abc import Callable
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
 from codeharness.tools.todo import TODO as DEFAULT_TODO
-import hooks
-from hooks import SESSION_STATS, trigger_hooks
+from codeharness import hooks
+from codeharness.hooks import SESSION_STATS, trigger_hooks
 from codeharness.context.budget import ContextBudget
 from codeharness.context.token_counter import TokenCounter
 from codeharness.context.manager import ContextManager

@@ -9,7 +9,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from task_system import TASKS
+from codeharness.tasks import TASKS
 
 WORKTREES_DIR = Path(".worktrees")
 BRANCH_PREFIX = "wt/"
@@ -140,7 +140,7 @@ def remove_worktree(name: str, force: bool = False) -> tuple[bool, str]:
 						   f"worktree '{name}'; complete or release it first")
 
 	# 2. No teammate currently assigned to it (check live registry).
-	from team.manager import TEAM
+	from codeharness.team.manager import TEAM
 	for state in TEAM.list_states():
 		if state.assignment and Path(state.assignment.get("cwd", "")) == path.resolve():
 			return False, (f"Teammate {state.name} is still working in "

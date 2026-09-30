@@ -12,12 +12,12 @@ Package layout (single-direction dependencies):
   tools.py      leader tool schemas + handlers (TEAM_TOOLS / TEAM_HANDLERS)
 """
 
-from team.bus import BUS, LEADER
-from team.protocol import ProtocolState
-from team.teammate import TEAMMATE_TOOLS, TeammateState
-from team.manager import TEAM, TeamManager
-from team.tools import TEAM_TOOLS, TEAM_HANDLERS
-from team import wakeup
+from codeharness.team.bus import BUS, LEADER
+from codeharness.team.protocol import ProtocolState
+from codeharness.team.teammate import TEAMMATE_TOOLS, TeammateState
+from codeharness.team.manager import TEAM, TeamManager
+from codeharness.team.tools import TEAM_TOOLS, TEAM_HANDLERS
+from codeharness.team import wakeup
 
 __all__ = [
 	"BUS", "LEADER",
