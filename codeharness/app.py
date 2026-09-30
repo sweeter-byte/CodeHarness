@@ -177,23 +177,36 @@ class CodeHarness:
         if not self._turn_lock.acquire(blocking=False):
             return False
 
-        injected = {"role": "user", "content": content}
+        result = None
         try:
             # Close the race where a user turn becomes pending between the
             # first check and this non-blocking lock acquisition.
             if self._user_turn_pending.is_set():
                 return False
+            injected = {"role": "user", "content": content}
             self.history.append(injected)
             try:
                 result = self._run_agent_turn(interactive_approval=False)
             except Exception:
                 self._remove_injected_message(injected)
                 raise
-            if result and self.async_result_handler is not None:
-                self.async_result_handler(result)
-            return True
         finally:
             self._turn_lock.release()
+
+        # The agent turn is committed; a failed presentation must not make
+        # cron/team re-run it.
+        if result and self.async_result_handler is not None:
+            try:
+                self.async_result_handler(result)
+            except Exception as exc:
+                try:
+                    self._emit_status(
+                        "\033[31m[Runtime] Failed to present async result: "
+                        f"{exc}\033[0m"
+                    )
+                except Exception:
+                    pass
+        return True
 
     def _run_agent_turn(self, *, interactive_approval: bool) -> str:
         previous = hooks.INTERACTIVE_APPROVAL_ALLOWED.value

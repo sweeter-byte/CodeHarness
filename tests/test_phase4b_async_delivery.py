@@ -401,6 +401,122 @@ def test_cli_registers_and_displays_async_results():
     assert any(">> " in line for line in output)
 
 
+def test_async_result_handler_runs_after_turn_lock_is_released(tmp_path):
+    harness = _runtime(tmp_path)
+    harness.agent = _ImmediateAgent(result="answer")
+    lock_was_free = []
+
+    def presenting_handler(_result):
+        lock_was_free.append(harness._turn_lock.acquire(blocking=False))
+        if lock_was_free[-1]:
+            harness._turn_lock.release()
+
+    harness.set_async_result_handler(presenting_handler)
+
+    assert harness._try_deliver_async("background") is True
+    assert lock_was_free == [True]
+
+
+def test_presentation_failure_still_counts_as_successful_delivery(
+    monkeypatch, tmp_path
+):
+    statuses = []
+    harness = _runtime(tmp_path)
+    agent = _ImmediateAgent(result="answer")
+    harness.agent = agent
+
+    def failing_handler(_result):
+        raise RuntimeError("ui broke")
+
+    harness.set_async_result_handler(failing_handler)
+    harness.set_status_handler(statuses.append)
+
+    assert harness._try_deliver_async("background") is True
+
+    # The successful agent turn is not rolled back.
+    assert [m for m in harness.history if m.get("content") == "background"] == [
+        {"role": "user", "content": "background"}
+    ]
+    assert len(agent.calls) == 1
+    assert any("Failed to present async result" in line for line in statuses)
+    assert harness._turn_lock.acquire(blocking=False) is True
+    harness._turn_lock.release()
+
+
+def test_presentation_failure_with_failing_status_handler_still_succeeds(tmp_path):
+    harness = _runtime(tmp_path)
+    harness.agent = _ImmediateAgent(result="answer")
+
+    def failing_handler(_result):
+        raise RuntimeError("ui broke")
+
+    def failing_status(_message):
+        raise RuntimeError("status broke")
+
+    harness.set_async_result_handler(failing_handler)
+    harness.set_status_handler(failing_status)
+
+    assert harness._try_deliver_async("background") is True
+
+
+def test_cron_does_not_requeue_job_after_interface_presentation_failure(
+    monkeypatch, isolated_cron, tmp_path
+):
+    cron_scheduler, store = isolated_cron
+    harness = _runtime(tmp_path)
+    harness.agent = _ImmediateAgent(result="answer")
+
+    def failing_presentation(_result):
+        raise RuntimeError("ui broke")
+
+    harness.set_async_result_handler(failing_presentation)
+    job = cron_scheduler.CronJob("one", "* * * * *", "work", False, False, True)
+    store.jobs[job.id] = job
+    cron_scheduler._delivery_queue.append(job)
+    monkeypatch.setattr(
+        cron_scheduler,
+        "_delivery_handler",
+        harness._try_deliver_async,
+        raising=False,
+    )
+
+    cron_scheduler._queue_processor_loop(_OneIterationStop())
+
+    # The event reached the agent exactly once and is not queued again.
+    assert [m for m in harness.history if "[Scheduled] work" in m["content"]]
+    assert job.id not in store.jobs
+    assert cron_scheduler._delivery_queue == []
+
+
+def test_team_wakeup_clears_buffer_after_presentation_failure(monkeypatch, tmp_path):
+    from team import wakeup
+
+    harness = _runtime(tmp_path)
+    harness.agent = _ImmediateAgent(result="answer")
+
+    def failing_presentation(_result):
+        raise RuntimeError("ui broke")
+
+    harness.set_async_result_handler(failing_presentation)
+
+    waits = 0
+
+    def wait_for_messages(_agent, timeout):
+        nonlocal waits
+        waits += 1
+        return [_team_message()] if waits == 1 else []
+
+    monkeypatch.setattr(wakeup.BUS, "wait_for_messages", wait_for_messages)
+    monkeypatch.setattr(wakeup._stop_event, "is_set", lambda: waits >= 2)
+
+    wakeup._wakeup_loop(harness._try_deliver_async)
+
+    # The model-facing event was delivered exactly once.
+    assert (
+        sum(1 for m in harness.history if "[Team events]" in m["content"]) == 1
+    )
+
+
 def test_backend_files_do_not_contain_cli_prompt():
     import cron_scheduler
     from codeharness import app as app_module
