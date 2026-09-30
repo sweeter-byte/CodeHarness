@@ -4,8 +4,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from skill_loader import SkillLoader
-from background import _format_bash_result
+from codeharness.skills import SkillLoader
+from codeharness.background.manager import _format_bash_result
 
 # ── Skill Loader (module-level singleton) ─────────────────────
 SKILL_LOADER = SkillLoader()
@@ -464,7 +464,7 @@ def run_load_skill(name: str) -> str:
 
 def run_read_artifact(artifact_id: str, offset: int = None, limit: int = None) -> str:
     """Rehydration: read back a previously externalized artifact."""
-    from context.artifact_store import ARTIFACT_STORE
+    from codeharness.context.artifact_store import ARTIFACT_STORE
     return ARTIFACT_STORE.read(artifact_id, offset, limit)
 
 

@@ -1,7 +1,7 @@
 import json
 import re
 
-from context.checkpoint import ContextCheckpoint
+from .checkpoint import ContextCheckpoint
 
 COMPACTION_PROMPT = """\
 You are a context compactor for a coding agent.

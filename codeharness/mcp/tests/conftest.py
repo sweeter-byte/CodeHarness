@@ -1,4 +1,4 @@
-"""Shared fixtures for mcp_host tests."""
+"""Shared fixtures for codeharness.mcp tests."""
 
 import sys
 from pathlib import Path
@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 # Make the project root importable regardless of how pytest is invoked.
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mcp_host.runtime import SyncMCPRuntime
+from codeharness.mcp.runtime import SyncMCPRuntime
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 """Fake stdio MCP server for adapter tests — not part of the runtime package.
 
-Run as a subprocess: ``python mcp_host/tests/fake_server.py``.
+Run as a subprocess: ``python codeharness.mcp/tests/fake_server.py``.
 
 Exercises: pagination (2 pages), name-collision inputs ("a.b" vs "a_b"),
 deterministic long-name truncation, env pass-through, text/image/tool-error

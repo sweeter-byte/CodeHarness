@@ -1,10 +1,10 @@
-"""Unit tests for mcp_host.config — loading, expansion, validation."""
+"""Unit tests for codeharness.mcp.config — loading, expansion, validation."""
 
 import json
 
 import pytest
 
-from mcp_host.config import MCPConfigError, load_config, validate_config
+from codeharness.mcp.config import MCPConfigError, load_config, validate_config
 
 
 def _write(tmp_path, data) -> str:

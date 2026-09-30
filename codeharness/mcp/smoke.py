@@ -2,7 +2,7 @@
 
 Usage (from the project root, conda env `coding-agent`):
 
-    python -m mcp_host.smoke [server_name]     # default: filesystem
+    python -m codeharness.mcp.smoke [server_name]     # default: filesystem
 
 Requires node/npx; the first run downloads @modelcontextprotocol/server-filesystem.
 Only read-only tools are invoked (list_directory / read_file).
@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 from dotenv import load_dotenv
 
@@ -20,7 +20,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 # ${WORKSPACE} in mcp_servers.json defaults to the project root.
 os.environ.setdefault("WORKSPACE", str(PROJECT_ROOT))
 
-from mcp_host import (
+from codeharness.mcp import (
     MCPServerAdapter,
     load_config,
     shutdown_runtime,

@@ -1,4 +1,4 @@
-"""Unit tests for mcp_host.runtime — shared portal & persistent handles."""
+"""Unit tests for codeharness.mcp.runtime — shared portal & persistent handles."""
 
 import time
 from contextlib import asynccontextmanager

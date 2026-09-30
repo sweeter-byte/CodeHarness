@@ -5,11 +5,11 @@ from openai import OpenAI
 from tools import TOOLS, TOOL_HANDLERS, TODO, TodoManager, SKILL_LOADER
 import hooks
 from hooks import SESSION_STATS, trigger_hooks
-from context.budget import ContextBudget
-from context.token_counter import TokenCounter
-from context.manager import ContextManager
-from memory import MemoryManager
-from background import BACKGROUND, BackgroundManager, should_run_background
+from codeharness.context.budget import ContextBudget
+from codeharness.context.token_counter import TokenCounter
+from codeharness.context.manager import ContextManager
+from codeharness.memory import MemoryManager
+from codeharness.background import BACKGROUND, BackgroundManager, should_run_background
 
 load_dotenv(override=True)
 
@@ -336,7 +336,7 @@ if __name__ == "__main__":
     from team import TEAM_TOOLS, TEAM_HANDLERS
     from team import wakeup as team_wakeup
     import cron_scheduler
-    from mcp_host import MCPManager, MCPConfigError, load_config, shutdown_runtime
+    from codeharness.mcp import MCPManager, MCPConfigError, load_config, shutdown_runtime
 
     # Compose the parent agent's full tool set: base tools + delegation + task
     # system + agent team + cron. team.teammate imported TEAMMATE_TOOLS from

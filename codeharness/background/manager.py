@@ -26,7 +26,7 @@ def _format_bash_result(stdout: str, stderr: str, exit_code: int) -> str:
 		return "(no output)"
 	# Large output: structured view + artifact reference
 	if len(out) > 30000:
-		from context.artifact_store import ARTIFACT_STORE
+		from codeharness.context.artifact_store import ARTIFACT_STORE
 		aid = ARTIFACT_STORE.save(out, prefix="bg_bash")
 		head = out[:2000]
 		tail = out[-500:] if len(out) > 2500 else ""

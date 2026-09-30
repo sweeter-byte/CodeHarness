@@ -1,8 +1,8 @@
-"""Unit tests for mcp_host.adapter — pure naming / registry / schema logic."""
+"""Unit tests for codeharness.mcp.adapter — pure naming / registry / schema logic."""
 
 import pytest
 
-from mcp_host.adapter import (
+from codeharness.mcp.adapter import (
     MAX_NAME_LEN,
     ToolDescriptor,
     ToolNameCollisionError,

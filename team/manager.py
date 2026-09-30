@@ -10,7 +10,7 @@ handshake — the thread is never killed.
 import threading
 
 from task_system import TASKS, AGENT_NAMES
-from background import BackgroundManager
+from codeharness.background import BackgroundManager
 from team.bus import BUS, LEADER
 from team import protocol
 from team.teammate import (

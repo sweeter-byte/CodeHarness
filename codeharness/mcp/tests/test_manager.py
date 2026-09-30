@@ -1,4 +1,4 @@
-"""Tests for mcp_host.manager — multi-server lifecycle, assembly, dispatch.
+"""Tests for codeharness.mcp.manager — multi-server lifecycle, assembly, dispatch.
 
 Uses the in-process ``server=`` seam of MCPServerAdapter (via an injected
 adapter_factory) so no subprocess is spawned.
@@ -8,9 +8,9 @@ import mcp_types as types
 import pytest
 from mcp.server.lowlevel import Server
 
-from mcp_host.client import MCPServerAdapter
-from mcp_host.config import ServerConfig
-from mcp_host.manager import MCPAssemblyError, MCPManager
+from codeharness.mcp.client import MCPServerAdapter
+from codeharness.mcp.config import ServerConfig
+from codeharness.mcp.manager import MCPAssemblyError, MCPManager
 
 
 def _inproc_server(tool_names):
@@ -115,7 +115,7 @@ def test_connect_failure_warns_and_skips(runtime):
 
 
 def test_connect_failure_fail_fast_raises(runtime):
-    from mcp_host.client import MCPConnectError
+    from codeharness.mcp.client import MCPConnectError
     configs = {"broken": _config("broken", command="/nonexistent/binary-xyz")}
     mgr = _manager(configs, {}, runtime)
     with pytest.raises(MCPConnectError):

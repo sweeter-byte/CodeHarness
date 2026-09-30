@@ -1,7 +1,7 @@
 import uuid
 from pathlib import Path
 
-from context.token_counter import TokenCounter
+from .token_counter import TokenCounter
 
 _DEFAULT_DIR = Path(".codeharness/artifacts")
 _PREVIEW_CHARS = 1500

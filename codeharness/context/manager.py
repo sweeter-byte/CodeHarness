@@ -7,11 +7,11 @@ Pipeline order (deterministic/recoverable first, lossy semantic last):
   Layer 4  Semantic compaction → Structured Checkpoint
 """
 
-from context.budget import ContextBudget
-from context.token_counter import TokenCounter
-from context.artifact_store import ARTIFACT_STORE, ArtifactStore
-from context.transcript_store import TRANSCRIPT_STORE, TranscriptStore
-from context.compactor import Compactor
+from .budget import ContextBudget
+from .token_counter import TokenCounter
+from .artifact_store import ARTIFACT_STORE, ArtifactStore
+from .transcript_store import TRANSCRIPT_STORE, TranscriptStore
+from .compactor import Compactor
 
 # Layer 1: externalize a single tool result above this token count
 _EXTERNALIZE_TOKEN_THRESHOLD = 8000

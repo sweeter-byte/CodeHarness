@@ -9,8 +9,8 @@ import shutil
 
 import pytest
 
-from mcp_host.config import ServerConfig
-from mcp_host.manager import MCPManager
+from codeharness.mcp.config import ServerConfig
+from codeharness.mcp.manager import MCPManager
 
 pytestmark = pytest.mark.skipif(
     shutil.which("npx") is None,

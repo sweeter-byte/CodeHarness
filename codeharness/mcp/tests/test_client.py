@@ -1,4 +1,4 @@
-"""Tests for mcp_host.client — MCPServerAdapter over the v2 high-level Client.
+"""Tests for codeharness.mcp.client — MCPServerAdapter over the v2 high-level Client.
 
 Two levels:
 * in-process SDK ``Server`` via the ``server=`` test seam (fast, no subprocess);
@@ -14,8 +14,8 @@ import mcp_types as types
 import pytest
 from mcp.server.lowlevel import Server
 
-from mcp_host.client import MCPConnectError, MCPServerAdapter, normalize_call_result
-from mcp_host.config import ServerConfig
+from codeharness.mcp.client import MCPConnectError, MCPServerAdapter, normalize_call_result
+from codeharness.mcp.config import ServerConfig
 
 FAKE_SERVER = Path(__file__).parent / "fake_server.py"
 

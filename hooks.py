@@ -2,7 +2,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from permission import PermissionManager
+from codeharness.security.permission import PermissionManager
 
 # ── Hook Registry ─────────────────────────────────────────────
 

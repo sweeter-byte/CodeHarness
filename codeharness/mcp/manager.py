@@ -1,6 +1,6 @@
 """Multi-server MCP lifecycle: connect, assemble, dispatch, close.
 
-Sits above :class:`~mcp_host.client.MCPServerAdapter` (one per server) and
+Sits above :class:`~codeharness.mcp.client.MCPServerAdapter` (one per server) and
 below the agent loop. Phase-1 responsibilities (deliberately minimal):
 
 * connect every *enabled* configured server — a single server failing is

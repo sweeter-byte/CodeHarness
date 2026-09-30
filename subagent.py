@@ -54,7 +54,7 @@ def run_task(prompt: str) -> str:
     """Run a nested agent loop in a fresh context; return its final text."""
     from agent_loop import Agent          # lazy import to avoid circular dependency
     from tools import TodoManager, make_todo_handler
-    from background import BackgroundManager
+    from codeharness.background import BackgroundManager
 
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
     sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop

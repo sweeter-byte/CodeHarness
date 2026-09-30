@@ -5,8 +5,8 @@ MCP_HOST_POLICY, resolved through injected callables (no MCPManager needed),
 plus a regression check that native tools are unaffected.
 """
 
-import permission
-from permission import MCP_HOST_POLICY, PermissionManager
+from codeharness.security import permission
+from codeharness.security.permission import MCP_HOST_POLICY, PermissionManager
 
 
 class _Ann:
