@@ -132,7 +132,33 @@ def test_status_handler_receives_agent_status(monkeypatch):
     assert any("BLOCKED bash: blocked by test" in status for status in statuses)
 
 
-def test_subagent_uses_configured_agent_factory(monkeypatch):
+def test_agent_background_bash_always_executes_through_handler(monkeypatch):
+    from codeharness.core import agent as agent_module
+
+    monkeypatch.setattr(agent_module, "trigger_hooks", lambda *args: None)
+    background_calls = []
+    handler_calls = []
+    background = SimpleNamespace(
+        start=lambda *args, **kwargs: background_calls.append((args, kwargs))
+    )
+    agent = _agent(agent_module, background_manager=background)
+    messages = []
+
+    executed = agent._execute_tool(
+        lambda **kwargs: handler_calls.append(kwargs) or "started by handler",
+        "call-background",
+        "bash",
+        {"command": "pwd", "run_in_background": True},
+        messages,
+    )
+
+    assert executed is True
+    assert background_calls == []
+    assert handler_calls == [{"command": "pwd", "run_in_background": True}]
+    assert messages[-1]["content"] == "started by handler"
+
+
+def test_subagent_uses_configured_agent_factory_and_workspace(monkeypatch, tmp_path):
     from codeharness import subagent
 
     created = []
@@ -147,11 +173,13 @@ def test_subagent_uses_configured_agent_factory(monkeypatch):
         return FakeAgent()
 
     monkeypatch.setattr(subagent, "_agent_factory", None, raising=False)
-    subagent.configure_agent_factory(factory)
+    subagent.configure_agent_factory(factory, workspace=str(tmp_path))
 
     assert subagent.run_task("inspect it") == "summary"
     assert len(created) == 1
-    assert created[0]["system"] == subagent.SUB_SYSTEM
+    assert str(tmp_path) in created[0]["system"]
+    assert "tools" not in created[0]
+    assert "handlers" not in created[0]
     assert created[0]["interactive"] is True
 
 

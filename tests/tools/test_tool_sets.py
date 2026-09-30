@@ -42,8 +42,6 @@ def test_subagent_tool_set_is_exactly_the_base_set():
     from codeharness import subagent
 
     assert _names(subagent.SUB_TOOLS) == BASE_TOOL_NAMES
-    assert set(subagent.SUB_HANDLERS) == set(BASE_TOOL_NAMES)
-    assert "task" not in subagent.SUB_HANDLERS
     assert callable(subagent.TASK_HANDLERS["task"])
 
 

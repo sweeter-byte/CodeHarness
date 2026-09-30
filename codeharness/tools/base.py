@@ -11,12 +11,16 @@ list/dict.
 
 from codeharness.context.tools import CONTEXT_HANDLERS, CONTEXT_TOOLS
 from codeharness.skills.tools import SKILL_HANDLERS, SKILL_TOOLS
-from codeharness.tools.coding import CODING_HANDLERS, CODING_TOOLS
+from codeharness.tools.coding import CODING_TOOLS, make_coding_handlers
 from codeharness.tools.registry import ToolRegistry
 from codeharness.tools.todo import TODO_TOOLS, TodoManager, make_todo_handler
 
 
-def build_base_registry(todo_manager: TodoManager | None = None) -> ToolRegistry:
+def build_base_registry(
+    todo_manager: TodoManager | None = None,
+    background_manager=None,
+    workspace: str | None = None,
+) -> ToolRegistry:
     """Assemble a fresh registry with the base tool set.
 
     The todo_write handler is always bound to a per-registry TodoManager:
@@ -34,7 +38,10 @@ def build_base_registry(todo_manager: TodoManager | None = None) -> ToolRegistry
         todo_manager = TodoManager()
 
     registry = ToolRegistry()
-    registry.extend(CODING_TOOLS, CODING_HANDLERS)
+    registry.extend(
+        CODING_TOOLS,
+        make_coding_handlers(background_manager, default_cwd=workspace),
+    )
     registry.extend(TODO_TOOLS, {"todo_write": make_todo_handler(todo_manager)})
     registry.extend(SKILL_TOOLS, SKILL_HANDLERS)
     registry.extend(CONTEXT_TOOLS, CONTEXT_HANDLERS)

@@ -14,7 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from codeharness.background.manager import _format_bash_result
+from codeharness.background.manager import BackgroundManager, _format_bash_result
 
 # ── Tool Schemas ─────────────────────────────────────────────
 
@@ -241,13 +241,68 @@ def run_grep(pattern: str, path: str = ".", file_pattern: str = None,
     return "\n".join(results) if results else "(no matches)"
 
 
-# ── Handler Map ───────────────────────────────────────────────
+# ── Handler Factory ───────────────────────────────────────────
 
-CODING_HANDLERS = {
-    "bash":       run_bash,
-    "read_file":  run_read,
-    "write_file": run_write,
-    "edit_file":  run_edit,
-    "glob":       run_glob,
-    "grep":       run_grep,
-}
+
+def make_coding_handlers(
+    background_manager: BackgroundManager | None = None,
+    default_cwd: str | None = None,
+) -> dict:
+    """Build coding handlers bound to one background manager and workspace."""
+    if background_manager is None:
+        background_manager = BackgroundManager()
+
+    def _cwd(cwd: str | None) -> str | None:
+        return cwd if cwd is not None else default_cwd
+
+    def bash(
+        command: str,
+        run_in_background: bool = False,
+        cwd: str | None = None,
+    ) -> str:
+        effective_cwd = _cwd(cwd)
+        if run_in_background:
+            bg_id, error = background_manager.start(command, cwd=effective_cwd)
+            if bg_id is not None:
+                return f"[Background task {bg_id} started: {command}]"
+            return error
+        return run_bash(command, cwd=effective_cwd)
+
+    def read_file(
+        path: str,
+        start_line: int = None,
+        end_line: int = None,
+        cwd: str | None = None,
+    ) -> str:
+        return run_read(path, start_line, end_line, cwd=_cwd(cwd))
+
+    def write_file(path: str, content: str, cwd: str | None = None) -> str:
+        return run_write(path, content, cwd=_cwd(cwd))
+
+    def edit_file(
+        path: str,
+        old_text: str,
+        new_text: str,
+        cwd: str | None = None,
+    ) -> str:
+        return run_edit(path, old_text, new_text, cwd=_cwd(cwd))
+
+    def glob(pattern: str, cwd: str | None = None) -> str:
+        return run_glob(pattern, cwd=_cwd(cwd))
+
+    def grep(
+        pattern: str,
+        path: str = ".",
+        file_pattern: str = None,
+        cwd: str | None = None,
+    ) -> str:
+        return run_grep(pattern, path, file_pattern, cwd=_cwd(cwd))
+
+    return {
+        "bash": bash,
+        "read_file": read_file,
+        "write_file": write_file,
+        "edit_file": edit_file,
+        "glob": glob,
+        "grep": grep,
+    }

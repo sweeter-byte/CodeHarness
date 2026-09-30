@@ -116,6 +116,19 @@ def test_agent_default_registry_todo_write_shares_todo_manager():
     ]
 
 
+def test_agent_default_registry_uses_agent_workspace(tmp_path):
+    from codeharness.core import agent as agent_module
+
+    workspace = tmp_path / "runtime-workspace"
+    workspace.mkdir()
+    a = _bare_agent(agent_module, workspace=str(workspace))
+
+    a.handlers["write_file"](path="agent.txt", content="bound")
+
+    assert (workspace / "agent.txt").read_text() == "bound"
+    assert a.handlers["bash"](command="pwd") == str(workspace)
+
+
 def test_no_process_global_todo_or_background_default_exists():
     import codeharness.tools.todo as todo_module
     import codeharness.background as background_pkg
@@ -205,6 +218,28 @@ def test_runtime_leader_agent_shares_todo_manager_with_registry(monkeypatch, tmp
     assert harness.todo_manager.items == [
         {"content": "leader step", "status": "pending"}
     ]
+
+
+def test_runtime_leader_coding_tools_use_configured_workspace(monkeypatch, tmp_path):
+    process_cwd = tmp_path / "process-cwd"
+    workspace = tmp_path / "runtime-workspace"
+    process_cwd.mkdir()
+    workspace.mkdir()
+    monkeypatch.chdir(process_cwd)
+    harness = _started_runtime(monkeypatch, workspace)
+    monkeypatch.chdir(process_cwd)
+
+    write_result = harness.agent.handlers["write_file"](
+        path="leader.txt", content="leader workspace"
+    )
+    read_result = harness.agent.handlers["read_file"](path="leader.txt")
+    bash_result = harness.agent.handlers["bash"](command="pwd")
+
+    assert write_result == "Written 16 chars to leader.txt"
+    assert "leader workspace" in read_result
+    assert bash_result == str(workspace)
+    assert (workspace / "leader.txt").read_text() == "leader workspace"
+    assert not (process_cwd / "leader.txt").exists()
 
 
 # ── 9: Stop hook receives the Runtime session_stats ───────────

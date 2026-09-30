@@ -106,14 +106,21 @@ class CodeHarness:
         # Root native-tool permissions at the configured workspace, not at
         # the import-time cwd. Dependency direction stays Runtime → Permission.
         hooks.configure_permissions([str(self.config.workspace)])
-        configure_subagent_agent_factory(self.create_agent)
+        configure_subagent_agent_factory(
+            self.create_agent,
+            workspace=str(self.config.workspace),
+        )
         TEAM.set_agent_factory(self.create_agent)
 
         # Runtime-owned mutable state for the leader.
         self.todo_manager = TodoManager()
         self.background_manager = BackgroundManager()
 
-        registry = build_base_registry(todo_manager=self.todo_manager)
+        registry = build_base_registry(
+            todo_manager=self.todo_manager,
+            background_manager=self.background_manager,
+            workspace=str(self.config.workspace),
+        )
         registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
         registry.extend(TEAM_TOOLS, TEAM_HANDLERS)

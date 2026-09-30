@@ -9,7 +9,7 @@ from codeharness.context.budget import ContextBudget
 from codeharness.context.token_counter import TokenCounter
 from codeharness.context.manager import ContextManager
 from codeharness.memory import MemoryManager
-from codeharness.background import BackgroundManager, should_run_background
+from codeharness.background import BackgroundManager
 from codeharness.core.prompt import build_default_system_prompt
 from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
 
@@ -63,7 +63,10 @@ class Agent:
         self.approval_handler = approval_handler
         self.status_handler = status_handler
 
-        base_system = system or build_default_system_prompt(workspace or os.getcwd())
+        self.workspace = workspace
+        base_system = system or build_default_system_prompt(
+            self.workspace or os.getcwd()
+        )
 
         memory_block = self.memory_manager.load_relevant([]) if self.memory_manager else ""
         self.system = base_system + memory_block if memory_block else base_system
@@ -81,7 +84,11 @@ class Agent:
         # to THIS Agent's TodoManager so todo_write and self.todo_manager share
         # state. Explicit tools/handlers (the leader Runtime path) are kept as-is.
         if tools is None or handlers is None:
-            registry = build_base_registry(todo_manager=self.todo_manager)
+            registry = build_base_registry(
+                todo_manager=self.todo_manager,
+                background_manager=self.background_manager,
+                workspace=self.workspace,
+            )
             self.tools = tools if tools is not None else registry.schemas
             self.handlers = handlers if handlers is not None else registry.handlers
         else:
@@ -186,25 +193,11 @@ class Agent:
                 self._emit_status("\033[31m  ✗ Rejected by user\033[0m")
                 executed = False
             else:
-                if should_run_background(tool_name, args):
-                    bg_id, error = self.background_manager.start(args["command"])
-                    if bg_id is not None:
-                        output = f"[Background task {bg_id} started: {args['command']}]"
-                    else:
-                        output = error
-                else:
-                    output = handler(**args)
+                output = handler(**args)
                 executed = True
         else:
             # All hooks passed.
-            if should_run_background(tool_name, args):
-                bg_id, error = self.background_manager.start(args["command"])
-                if bg_id is not None:
-                    output = f"[Background task {bg_id} started: {args['command']}]"
-                else:
-                    output = error
-            else:
-                output = handler(**args)
+            output = handler(**args)
             executed = True
 
         # ── PostToolUse ──

@@ -11,14 +11,6 @@ import threading
 import time
 
 
-def should_run_background(tool_name: str, args: dict) -> bool:
-	"""Return True only when the model explicitly requests background execution."""
-	return (
-		tool_name == "bash"
-		and args.get("run_in_background") is True
-	)
-
-
 def _format_bash_result(stdout: str, stderr: str, exit_code: int) -> str:
 	"""Format command output; large output is externalised via ArtifactStore."""
 	out = (stdout + stderr).strip()
@@ -57,7 +49,12 @@ class BackgroundManager:
 		self._lock = threading.Lock()
 		self._counter = 0
 
-	def start(self, command: str, timeout: int = 120) -> tuple[str | None, str | None]:
+	def start(
+		self,
+		command: str,
+		timeout: int = 120,
+		cwd: str | None = None,
+	) -> tuple[str | None, str | None]:
 		"""Launch *command* in a daemon thread.
 
 		Returns (bg_id, None) on success, or (None, error_msg) when the
@@ -82,9 +79,10 @@ class BackgroundManager:
 				"start_time": time.time(),
 			}
 
+		effective_cwd = cwd if cwd is not None else os.getcwd()
 		t = threading.Thread(
 			target=self._run,
-			args=(bg_id, command, timeout),
+			args=(bg_id, command, timeout, effective_cwd),
 			daemon=True,
 		)
 		self.tasks[bg_id]["thread"] = t
@@ -94,12 +92,12 @@ class BackgroundManager:
 
 	# ── internal: runs inside the daemon thread ────────────────
 
-	def _run(self, bg_id: str, command: str, timeout: int):
+	def _run(self, bg_id: str, command: str, timeout: int, cwd: str):
 		try:
 			proc = subprocess.Popen(
 				command,
 				shell=True,
-				cwd=os.getcwd(),
+				cwd=cwd,
 				stdout=subprocess.PIPE,
 				stderr=subprocess.PIPE,
 				text=True,

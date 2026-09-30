@@ -101,14 +101,15 @@ class TeamManager:
 						f"{task.description}"),
 		})
 
+		teammate_bg = BackgroundManager()
 		state.agent = self._agent_factory(
 			system=teammate_system(state),
 			tools=list(TEAMMATE_TOOLS),
-			handlers=make_teammate_handlers(state),
+			handlers=make_teammate_handlers(state, teammate_bg),
 			max_rounds=TEAMMATE_MAX_ROUNDS,
 			todo_manager=state.todo,
 			memory_manager=False,          # leader owns cross-session memory
-			background_manager=BackgroundManager(),
+			background_manager=teammate_bg,
 			interactive=False,             # never prompt input() off-thread
 		)
 

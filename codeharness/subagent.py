@@ -1,28 +1,35 @@
 import os
-from codeharness.tools import build_base_registry, TodoManager, make_todo_handler
+from codeharness.tools import build_base_registry, TodoManager
 from codeharness.skills.tools import SKILL_LOADER
 
-SUB_SYSTEM = (
-    f"You are a subagent at {os.getcwd()}, delegated a specific subtask by a parent agent. "
-    "Use tools to complete it. Act, don't explain.\n"
-    "If the subtask is complex and multi-step, you MAY call todo_write to track your own "
-    "plan; skip it for simple tasks.\n"
-    "Your intermediate messages are DISCARDED — the parent sees ONLY your final text. "
-    "So your last message must be a complete, self-contained summary of the result "
-    "(findings, file changes, or why you failed).\n\n"
-    f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
-    "Use load_skill to read the full instructions when a skill applies."
-)
+
+def build_sub_system(workspace: str | None) -> str:
+    effective_workspace = workspace or os.getcwd()
+    return (
+        f"You are a subagent at {effective_workspace}, delegated a specific subtask "
+        "by a parent agent. Use tools to complete it. Act, don't explain.\n"
+        "If the subtask is complex and multi-step, you MAY call todo_write to track "
+        "your own plan; skip it for simple tasks.\n"
+        "Your intermediate messages are DISCARDED — the parent sees ONLY your final "
+        "text. So your last message must be a complete, self-contained summary of "
+        "the result (findings, file changes, or why you failed).\n\n"
+        f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
+        "Use load_skill to read the full instructions when a skill applies."
+    )
+
+
 SUB_MAX_ROUNDS = 30
 
 
 _agent_factory = None
+_workspace = None
 
 
-def configure_agent_factory(factory) -> None:
-    """Configure the Runtime-owned factory used for one-shot agents."""
-    global _agent_factory
+def configure_agent_factory(factory, workspace: str | None = None) -> None:
+    """Configure the Runtime-owned factory and workspace for one-shot agents."""
+    global _agent_factory, _workspace
     _agent_factory = factory
+    _workspace = workspace
 
 
 # The subagent tool set is exactly the base tool set, built explicitly from
@@ -30,9 +37,7 @@ def configure_agent_factory(factory) -> None:
 # (second-level delegation), task system tools, team tools and MCP tools are
 # Leader-only by construction: they are registered by the leader Runtime
 # registry, not in the base registry.
-_BASE_REGISTRY = build_base_registry()
-SUB_TOOLS = _BASE_REGISTRY.schemas
-SUB_HANDLERS = _BASE_REGISTRY.handlers
+SUB_TOOLS = build_base_registry().schemas
 
 TASK_TOOL = {
     "type": "function",
@@ -70,13 +75,9 @@ def run_task(prompt: str) -> str:
     print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
     sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop
     sub_bg = BackgroundManager()          # per-subagent background tasks
-    sub_handlers = dict(SUB_HANDLERS)
-    sub_handlers["todo_write"] = make_todo_handler(sub_todo)
 
     sub = _agent_factory(
-        system=SUB_SYSTEM,
-        tools=SUB_TOOLS,
-        handlers=sub_handlers,
+        system=build_sub_system(_workspace),
         max_rounds=SUB_MAX_ROUNDS,
         todo_manager=sub_todo,
         background_manager=sub_bg,

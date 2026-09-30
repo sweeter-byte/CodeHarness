@@ -23,9 +23,7 @@ import threading
 from dataclasses import dataclass, field
 
 from codeharness.tasks import TASKS, TASK_TOOLS, TASK_HANDLERS
-from codeharness.tools import (
-	build_base_registry, ToolRegistry, TodoManager, make_todo_handler,
-)
+from codeharness.tools import build_base_registry, TodoManager
 from codeharness.skills.tools import SKILL_LOADER
 from codeharness.team.bus import BUS, LEADER
 from codeharness.team import protocol
@@ -100,36 +98,20 @@ SUBMIT_PLAN_SCHEMA = {
 	},
 }
 
-# The teammate tool set is built from its own base registry: base tools
-# minus cron, plus the allowed task-board tools. It is never a filtered
-# view of the leader's pool, so 'task', task-graph mutation, team lifecycle
-# and MCP tools are excluded by construction — no import-order dependency.
-# send_message / submit_plan are appended as raw schemas: their handlers
-# are bound per teammate in make_teammate_handlers().
-#
-# Construction goes through the public API only: read the base registry's
-# public snapshots, drop the excluded names, then extend() a fresh registry.
-# ToolRegistry internals (_schemas/_handlers) are never touched here.
-_base = build_base_registry()
-_base_schemas = [s for s in _base.schemas
-				 if s["function"]["name"] not in _EXCLUDED_NAMES]
-_base_handlers = {name: handler for name, handler in _base.handlers.items()
-				  if name not in _EXCLUDED_NAMES}
-_task_board_schemas = [t for t in TASK_TOOLS
-					   if t["function"]["name"] in _TASK_BOARD_NAMES]
-_task_board_handlers = {name: handler for name, handler in TASK_HANDLERS.items()
-						if name in _TASK_BOARD_NAMES}
-
-_TEAMMATE_REGISTRY = ToolRegistry()
-_TEAMMATE_REGISTRY.extend(_base_schemas, _base_handlers)
-_TEAMMATE_REGISTRY.extend(_task_board_schemas, _task_board_handlers)
-
-TEAMMATE_TOOLS = _TEAMMATE_REGISTRY.schemas + [SEND_MESSAGE_SCHEMA, SUBMIT_PLAN_SCHEMA]
-
-# Teammate handlers = base handlers (minus cron) + task-board handlers;
-# todo_write / claim_task / complete_task / send_message / submit_plan are
-# bound per teammate in make_teammate_handlers().
-_TEAMMATE_BASE_HANDLERS = _TEAMMATE_REGISTRY.handlers
+# The teammate schema snapshot preserves the legacy visible tool order.
+_base_schemas = [
+	schema for schema in build_base_registry().schemas
+	if schema["function"]["name"] not in _EXCLUDED_NAMES
+]
+_task_board_schemas = [
+	schema for schema in TASK_TOOLS
+	if schema["function"]["name"] in _TASK_BOARD_NAMES
+]
+TEAMMATE_TOOLS = (
+	_base_schemas
+	+ _task_board_schemas
+	+ [SEND_MESSAGE_SCHEMA, SUBMIT_PLAN_SCHEMA]
+)
 
 
 @dataclass
@@ -187,7 +169,7 @@ def teammate_system(state: TeammateState) -> str:
 # ── Handler factory ───────────────────────────────────────────
 
 
-def make_teammate_handlers(state: TeammateState) -> dict:
+def make_teammate_handlers(state: TeammateState, background_manager) -> dict:
 	"""Build the teammate's handler map from the base handlers.
 
 	Workspace tools: assignment check → plan gate → cwd injection.
@@ -197,8 +179,18 @@ def make_teammate_handlers(state: TeammateState) -> dict:
 	"""
 	from codeharness.team.worktree import resolve_worktree_cwd
 
-	handlers = dict(_TEAMMATE_BASE_HANDLERS)
-	handlers["todo_write"] = make_todo_handler(state.todo)
+	base_registry = build_base_registry(
+		todo_manager=state.todo,
+		background_manager=background_manager,
+	)
+	handlers = {
+		name: handler for name, handler in base_registry.handlers.items()
+		if name not in _EXCLUDED_NAMES
+	}
+	handlers.update({
+		name: handler for name, handler in TASK_HANDLERS.items()
+		if name in _TASK_BOARD_NAMES
+	})
 
 	def _guard(tool_name: str, handler):
 		def wrapped(**kwargs):
