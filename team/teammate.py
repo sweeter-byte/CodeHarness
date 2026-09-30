@@ -23,7 +23,9 @@ import threading
 from dataclasses import dataclass, field
 
 from task_system import TASKS, TASK_TOOLS, TASK_HANDLERS
-from codeharness.tools import build_base_registry, TodoManager, make_todo_handler
+from codeharness.tools import (
+	build_base_registry, ToolRegistry, TodoManager, make_todo_handler,
+)
 from codeharness.skills.tools import SKILL_LOADER
 from team.bus import BUS, LEADER
 from team import protocol
@@ -104,15 +106,23 @@ SUBMIT_PLAN_SCHEMA = {
 # and MCP tools are excluded by construction — no import-order dependency.
 # send_message / submit_plan are appended as raw schemas: their handlers
 # are bound per teammate in make_teammate_handlers().
-_TEAMMATE_REGISTRY = build_base_registry()
-for _name in _EXCLUDED_NAMES:
-	_TEAMMATE_REGISTRY._schemas.pop(_name, None)
-	_TEAMMATE_REGISTRY._handlers.pop(_name, None)
-_TEAMMATE_REGISTRY.extend(
-	[t for t in TASK_TOOLS if t["function"]["name"] in _TASK_BOARD_NAMES],
-	{name: handler for name, handler in TASK_HANDLERS.items()
-	 if name in _TASK_BOARD_NAMES},
-)
+#
+# Construction goes through the public API only: read the base registry's
+# public snapshots, drop the excluded names, then extend() a fresh registry.
+# ToolRegistry internals (_schemas/_handlers) are never touched here.
+_base = build_base_registry()
+_base_schemas = [s for s in _base.schemas
+				 if s["function"]["name"] not in _EXCLUDED_NAMES]
+_base_handlers = {name: handler for name, handler in _base.handlers.items()
+				  if name not in _EXCLUDED_NAMES}
+_task_board_schemas = [t for t in TASK_TOOLS
+					   if t["function"]["name"] in _TASK_BOARD_NAMES]
+_task_board_handlers = {name: handler for name, handler in TASK_HANDLERS.items()
+						if name in _TASK_BOARD_NAMES}
+
+_TEAMMATE_REGISTRY = ToolRegistry()
+_TEAMMATE_REGISTRY.extend(_base_schemas, _base_handlers)
+_TEAMMATE_REGISTRY.extend(_task_board_schemas, _task_board_handlers)
 
 TEAMMATE_TOOLS = _TEAMMATE_REGISTRY.schemas + [SEND_MESSAGE_SCHEMA, SUBMIT_PLAN_SCHEMA]
 
