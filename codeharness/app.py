@@ -23,6 +23,7 @@ from codeharness.workflow import (
     WORKFLOW_TOOLS,
 )
 from codeharness.workflow.builtin import register_builtins as register_builtin_workflows
+from codeharness.goal import GoalController, GoalEvaluator, GOAL_TOOLS, make_goal_handlers
 
 from codeharness.config import RuntimeConfig
 from codeharness.core.agent import Agent
@@ -49,6 +50,7 @@ class CodeHarness:
         self.mcp_manager = None
         self.agent = None
         self.history = None
+        self.goal_controller = None
         self.approval_handler = None
         self.status_handler = None
         self.async_result_handler: Callable[[str], None] | None = None
@@ -139,6 +141,17 @@ class CodeHarness:
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
         registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
 
+        # ── Goal Loop ──
+        evaluator_model = self.config.evaluator_model or self.config.model
+        self.goal_controller = GoalController(
+            evaluator=GoalEvaluator(
+                client=self.client,
+                model=evaluator_model,
+            ),
+            status_handler=self._emit_status,
+        )
+        registry.extend(GOAL_TOOLS, make_goal_handlers(self.goal_controller))
+
         # ── Workflow Runtime ──
         register_builtin_workflows(WORKFLOWS)
         registry.extend(WORKFLOW_TOOLS, WORKFLOW_HANDLERS)
@@ -172,6 +185,7 @@ class CodeHarness:
             handlers=registry.handlers,
             todo_manager=self.todo_manager,
             background_manager=self.background_manager,
+            goal_controller=self.goal_controller,
         )
         self.history = []
 

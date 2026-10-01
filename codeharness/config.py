@@ -18,6 +18,7 @@ class RuntimeConfig:
     model_context_window: int
     workspace: Path
     mcp_config_path: Path
+    evaluator_model: str | None = None  # Goal Evaluator model (defaults to main model)
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -38,4 +39,5 @@ class RuntimeConfig:
             ),
             workspace=workspace,
             mcp_config_path=mcp_config_path,
+            evaluator_model=os.environ.get("GOAL_EVALUATOR_MODEL") or None,
         )

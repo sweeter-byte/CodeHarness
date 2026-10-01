@@ -12,6 +12,7 @@ from codeharness.memory import MemoryManager
 from codeharness.background import BackgroundManager
 from codeharness.core.prompt import build_default_system_prompt
 from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
+from codeharness.goal import GoalController, StopDecision
 
 
 MAX_CONSECUTIVE_REJECTIONS = 3
@@ -33,7 +34,8 @@ class Agent:
                  model_context_window: int = None,
                  workspace: str = None,
                  approval_handler: Callable[[str], bool] | None = None,
-                 status_handler: Callable[[str], None] | None = None):
+                 status_handler: Callable[[str], None] | None = None,
+                 goal_controller: GoalController = None):
         self.client = client if client is not None else OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -95,6 +97,12 @@ class Agent:
             self.tools = tools
             self.handlers = handlers
         self.max_rounds = max_rounds
+
+        # ── Goal Loop ──
+        # Only the Leader Agent holds a real controller; SubAgent / Teammate
+        # use the null instance (always ALLOW).
+        self.goal_controller = goal_controller if goal_controller is not None \
+            else GoalController.null()
 
         # ── Context Management ──
         self.token_counter = TokenCounter()
@@ -288,6 +296,33 @@ class Agent:
                 messages.append(msg.model_dump())
 
                 if not msg.tool_calls:
+                    # ── Goal Gate: evaluate before exiting ──
+                    decision = self.goal_controller.evaluate_after_turn(
+                        messages, self.background_manager
+                    )
+
+                    if decision in (StopDecision.ALLOW, StopDecision.ACHIEVED):
+                        if normal_exit and self.memory_manager:
+                            self.memory_manager.extract_memories(messages)
+                            self.memory_manager.consolidate_memories()
+                        return msg.content or ""
+
+                    if decision == StopDecision.BLOCK:
+                        feedback = self.goal_controller.build_feedback_message()
+                        messages.append({"role": "user", "content": feedback})
+                        continue
+
+                    if decision == StopDecision.DEFER:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[Goal Gate] Background tasks still running. "
+                                "Wait for results before concluding."
+                            ),
+                        })
+                        continue
+
+                    # FAILED / ERROR / LIMIT → safe exit, goal stays active
                     if normal_exit and self.memory_manager:
                         self.memory_manager.extract_memories(messages)
                         self.memory_manager.consolidate_memories()

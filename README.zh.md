@@ -487,3 +487,10 @@ CodeHarness (app.py)
      ├── Team (team/)                     → 持久协作，共享任务板
      └── Workflow (workflow/)              → 路径已知，确定性编排   ← NEW
 ```
+
+
+
+## Goal Loop
+
+启动Goal模式,当模型不再调用工具时,不立即结束循环,而是要经过Goal Gate判断.
+
