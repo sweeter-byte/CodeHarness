@@ -279,6 +279,7 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         "approval_handler": None,
         "status_handler": None,
         "session_stats": harness.session_stats,
+        "workflow_catalog": harness.workflow_registry.catalog(),
     }]
 
 

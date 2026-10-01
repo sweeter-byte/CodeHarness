@@ -24,11 +24,6 @@ from pathlib import Path
 from typing import Any
 
 
-# ── Constants ─────────────────────────────────────────────────
-
-WORKFLOWS_DIR = Path(".codeharness/workflows")
-
-
 # ── Run Status ────────────────────────────────────────────────
 
 
@@ -108,8 +103,8 @@ class WorkflowStateStore:
 	atomic file replacement.
 	"""
 
-	def __init__(self, base_dir: Path = WORKFLOWS_DIR):
-		self.base_dir = base_dir
+	def __init__(self, base_dir: Path):
+		self.base_dir = Path(base_dir)
 		self.base_dir.mkdir(parents=True, exist_ok=True)
 		self._locks: dict[str, threading.Lock] = {}
 		self._meta_lock = threading.Lock()
@@ -286,8 +281,3 @@ class WorkflowStateStore:
 	def release_run_lock(self, run_id: str) -> None:
 		lock_path = self._run_dir(run_id) / ".lock"
 		lock_path.unlink(missing_ok=True)
-
-
-# ── Module-level singleton ────────────────────────────────────
-
-STATE_STORE = WorkflowStateStore()

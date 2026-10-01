@@ -17,10 +17,12 @@ from codeharness.tasks import TASK_HANDLERS as TASK_SYS_HANDLERS, TASK_TOOLS
 from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
 from codeharness.team import wakeup as team_wakeup
 from codeharness.workflow import (
-    WORKFLOWS,
-    WORKFLOW_HANDLERS,
-    WORKFLOW_RUNTIME,
     WORKFLOW_TOOLS,
+    WorkflowEventBus,
+    WorkflowRegistry,
+    WorkflowRuntime,
+    WorkflowStateStore,
+    make_workflow_handlers,
 )
 from codeharness.workflow.builtin import register_builtins as register_builtin_workflows
 from codeharness.goal import GoalController, GoalEvaluator, GOAL_TOOLS, make_goal_handlers
@@ -51,6 +53,17 @@ class CodeHarness:
         self.agent = None
         self.history = None
         self.goal_controller = None
+        self.workflow_registry = WorkflowRegistry()
+        register_builtin_workflows(self.workflow_registry)
+        self.workflow_state_store = WorkflowStateStore(
+            self.config.workspace / ".codeharness" / "workflows"
+        )
+        self.workflow_event_bus = WorkflowEventBus()
+        self.workflow_runtime = WorkflowRuntime(
+            registry=self.workflow_registry,
+            state_store=self.workflow_state_store,
+            event_bus=self.workflow_event_bus,
+        )
         self.approval_handler = None
         self.status_handler = None
         self.async_result_handler: Callable[[str], None] | None = None
@@ -102,6 +115,7 @@ class CodeHarness:
             "approval_handler": self.approval_handler,
             "status_handler": self.status_handler,
             "session_stats": self.session_stats,
+            "workflow_catalog": self.workflow_registry.catalog(),
         }
         defaults.update(kwargs)
         return Agent(**defaults)
@@ -153,10 +167,11 @@ class CodeHarness:
         registry.extend(GOAL_TOOLS, make_goal_handlers(self.goal_controller))
 
         # ── Workflow Runtime ──
-        register_builtin_workflows(WORKFLOWS)
-        registry.extend(WORKFLOW_TOOLS, WORKFLOW_HANDLERS)
-        WORKFLOW_RUNTIME.set_agent_factory(self.create_agent)
-        WORKFLOW_RUNTIME.set_registry(WORKFLOWS)
+        registry.extend(
+            WORKFLOW_TOOLS,
+            make_workflow_handlers(self.workflow_runtime),
+        )
+        self.workflow_runtime.set_agent_factory(self.create_agent)
 
         try:
             mcp_configs = load_config(self.config.mcp_config_path)
@@ -177,7 +192,7 @@ class CodeHarness:
             self.mcp_manager.resolve,
             self.mcp_manager.annotations_of,
         )
-        WORKFLOW_RUNTIME.set_tool_registry(registry)
+        self.workflow_runtime.set_tool_registry(registry)
 
         self.registry = registry
         self.agent = self.create_agent(
@@ -199,7 +214,7 @@ class CodeHarness:
             delivery_handler=self._try_deliver_async,
             status_handler=self._emit_status,
         )
-        WORKFLOW_RUNTIME.set_delivery_handler(self._try_deliver_async)
+        self.workflow_runtime.set_delivery_handler(self._try_deliver_async)
         self._workflow_started = True
         self._closing.clear()
         self._started = True
@@ -371,7 +386,7 @@ class CodeHarness:
             team_stopped = False
 
         try:
-            workflow_stopped = WORKFLOW_RUNTIME.shutdown_all(timeout=CLOSE_TIMEOUT)
+            workflow_stopped = self.workflow_runtime.shutdown_all(timeout=CLOSE_TIMEOUT)
         except Exception:
             workflow_stopped = False
         if self._workflow_started and workflow_stopped:
@@ -397,10 +412,9 @@ class CodeHarness:
             pass
 
         try:
-            WORKFLOW_RUNTIME.set_agent_factory(None)
-            WORKFLOW_RUNTIME.set_tool_registry(None)
-            WORKFLOW_RUNTIME.set_delivery_handler(None)
-            WORKFLOW_RUNTIME.set_registry(None)
+            self.workflow_runtime.set_agent_factory(None)
+            self.workflow_runtime.set_tool_registry(None)
+            self.workflow_runtime.set_delivery_handler(None)
         except Exception:
             pass
 

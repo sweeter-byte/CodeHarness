@@ -220,8 +220,3 @@ def log_entry(run_id: str, message: str) -> ProgressEvent:
 		run_id=run_id,
 		message=message,
 	)
-
-
-# ── Module-level singleton ────────────────────────────────────
-
-EVENT_BUS = WorkflowEventBus()

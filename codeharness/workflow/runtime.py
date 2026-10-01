@@ -36,7 +36,7 @@ from codeharness.workflow.definition import (
 	WorkflowStep,
 )
 from codeharness.workflow.events import (
-	EVENT_BUS,
+	WorkflowEventBus,
 	log_entry,
 	phase_completed,
 	phase_started,
@@ -49,11 +49,11 @@ from codeharness.workflow.events import (
 	workflow_failed,
 	workflow_started,
 )
+from codeharness.workflow.registry import WorkflowRegistry
 from codeharness.workflow.state import (
 	JournalEntry,
 	RunSnapshot,
 	RunStatus,
-	STATE_STORE,
 	WorkflowStateStore,
 	compute_stable_key,
 )
@@ -184,16 +184,19 @@ WORKFLOW_AGENT_SYSTEM = (
 class WorkflowRuntime:
 	"""Orchestrates workflow execution: start, resume, cancel, query.
 
-	Singleton per CodeHarness runtime (like TEAM / TASKS).
+	Owned by one CodeHarness runtime.
 	"""
 
 	def __init__(
 		self,
-		state_store: WorkflowStateStore | None = None,
-		event_bus=None,
+		*,
+		registry: WorkflowRegistry,
+		state_store: WorkflowStateStore,
+		event_bus: WorkflowEventBus,
 	):
-		self._store = state_store or STATE_STORE
-		self._bus = event_bus or EVENT_BUS
+		self._registry = registry
+		self._store = state_store
+		self._bus = event_bus
 		self._runs: dict[str, RunHandle] = {}
 		self._lock = threading.Lock()
 		self._agent_factory: AgentFactory | None = None
@@ -201,7 +204,6 @@ class WorkflowRuntime:
 		self._tool_registry = None
 		self._tool_executor = ToolExecutor()
 		self._delivery_handler: DeliveryHandler | None = None
-		self._registry = None  # set lazily to avoid circular import
 
 	# ── Configuration ──
 
@@ -221,9 +223,6 @@ class WorkflowRuntime:
 	def set_delivery_handler(self, handler: DeliveryHandler | None) -> None:
 		"""Handler for async result delivery to the leader agent."""
 		self._delivery_handler = handler
-
-	def set_registry(self, registry) -> None:
-		self._registry = registry
 
 	# ── Public API ──
 
@@ -1167,8 +1166,3 @@ class WorkflowRuntime:
 			self._delivery_handler(message)
 		except Exception:  # noqa: BLE001
 			pass
-
-
-# ── Module-level singleton ────────────────────────────────────
-
-WORKFLOW_RUNTIME = WorkflowRuntime()

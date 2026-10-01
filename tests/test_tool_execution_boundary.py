@@ -9,6 +9,7 @@ from codeharness.security.permission import MCP_HOST_POLICY, PermissionManager
 from codeharness.tools import ToolRegistry, build_base_registry
 from codeharness.tools.executor import ToolExecutor
 from codeharness.workflow.definition import AgentStep, ToolStep, WorkflowConfig
+from codeharness.workflow.registry import WorkflowRegistry as WorkflowDefinitionRegistry
 from codeharness.workflow.runtime import (
     WorkflowContext,
     WorkflowError,
@@ -36,7 +37,11 @@ class _RecordingStateStore:
 
 
 def _workflow_runtime(handler):
-    runtime = WorkflowRuntime(event_bus=_RecordingEventBus())
+    runtime = WorkflowRuntime(
+        registry=WorkflowDefinitionRegistry(),
+        state_store=_RecordingStateStore(),
+        event_bus=_RecordingEventBus(),
+    )
     runtime.set_tool_resolver(lambda _name: handler)
     return runtime
 
@@ -218,7 +223,11 @@ def test_workflow_safe_read_uses_workspace_bound_native_handler(
         PermissionManager(allowed_dirs=[str(workspace)], base_dir=workspace),
     )
     registry = build_base_registry(workspace=str(workspace))
-    runtime = WorkflowRuntime(event_bus=_RecordingEventBus())
+    runtime = WorkflowRuntime(
+        registry=WorkflowDefinitionRegistry(),
+        state_store=_RecordingStateStore(),
+        event_bus=_RecordingEventBus(),
+    )
     runtime.set_tool_resolver(registry.get)
 
     result = runtime._execute_tool_step(
@@ -314,6 +323,7 @@ def test_workflow_agent_whitelist_uses_current_runtime_registry():
             return "done"
 
     runtime = WorkflowRuntime(
+        registry=WorkflowDefinitionRegistry(),
         state_store=_RecordingStateStore(),
         event_bus=_RecordingEventBus(),
     )

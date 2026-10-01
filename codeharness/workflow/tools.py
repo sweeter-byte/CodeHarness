@@ -12,15 +12,18 @@ registered by the leader Runtime via registry.extend().
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
-from codeharness.workflow.runtime import WORKFLOW_RUNTIME
+from codeharness.workflow.runtime import WorkflowRuntime
 
 
 # ── Tool Handlers ─────────────────────────────────────────────
 
 
-def run_start_workflow(name: str, inputs: str = "{}") -> str:
+def _run_start_workflow(
+	runtime: WorkflowRuntime, name: str, inputs: str = "{}"
+) -> str:
 	"""Start a new workflow run."""
 	# Parse inputs (may come as JSON string from the model)
 	if isinstance(inputs, str):
@@ -31,7 +34,7 @@ def run_start_workflow(name: str, inputs: str = "{}") -> str:
 	else:
 		parsed_inputs = inputs if isinstance(inputs, dict) else {}
 
-	run_id, error = WORKFLOW_RUNTIME.start(name, parsed_inputs)
+	run_id, error = runtime.start(name, parsed_inputs)
 	if error:
 		return error
 	return (
@@ -40,9 +43,9 @@ def run_start_workflow(name: str, inputs: str = "{}") -> str:
 	)
 
 
-def run_resume_workflow(run_id: str) -> str:
+def _run_resume_workflow(runtime: WorkflowRuntime, run_id: str) -> str:
 	"""Resume a failed or interrupted workflow run."""
-	resumed_id, error = WORKFLOW_RUNTIME.resume(run_id)
+	resumed_id, error = runtime.resume(run_id)
 	if error:
 		return error
 	return (
@@ -52,10 +55,10 @@ def run_resume_workflow(run_id: str) -> str:
 	)
 
 
-def run_workflow_status(run_id: str = "") -> str:
+def _run_workflow_status(runtime: WorkflowRuntime, run_id: str = "") -> str:
 	"""Query workflow run status."""
 	target = run_id.strip() if run_id else None
-	result = WORKFLOW_RUNTIME.status(target)
+	result = runtime.status(target)
 
 	if "error" in result:
 		return f"Error: {result['error']}"
@@ -174,10 +177,25 @@ WORKFLOW_TOOLS = [
 	},
 ]
 
-# ── Handler Map ───────────────────────────────────────────────
+# ── Runtime-bound Handler Map ─────────────────────────────────
 
-WORKFLOW_HANDLERS = {
-	"start_workflow": run_start_workflow,
-	"resume_workflow": run_resume_workflow,
-	"workflow_status": run_workflow_status,
-}
+
+def make_workflow_handlers(
+	runtime: WorkflowRuntime,
+) -> dict[str, Callable[..., str]]:
+	"""Bind Workflow tool handlers to one CodeHarness-owned runtime."""
+
+	def start_workflow(name: str, inputs: str = "{}") -> str:
+		return _run_start_workflow(runtime, name, inputs)
+
+	def resume_workflow(run_id: str) -> str:
+		return _run_resume_workflow(runtime, run_id)
+
+	def workflow_status(run_id: str = "") -> str:
+		return _run_workflow_status(runtime, run_id)
+
+	return {
+		"start_workflow": start_workflow,
+		"resume_workflow": resume_workflow,
+		"workflow_status": workflow_status,
+	}

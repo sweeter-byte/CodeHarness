@@ -36,7 +36,8 @@ class Agent:
                  workspace: str = None,
                  approval_handler: Callable[[str], bool] | None = None,
                  status_handler: Callable[[str], None] | None = None,
-                 goal_controller: GoalController = None):
+                 goal_controller: GoalController = None,
+                 workflow_catalog: str = "(no workflows available)"):
         self.client = client if client is not None else OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -68,7 +69,8 @@ class Agent:
 
         self.workspace = workspace
         base_system = system or build_default_system_prompt(
-            self.workspace or os.getcwd()
+            self.workspace or os.getcwd(),
+            workflow_catalog=workflow_catalog,
         )
 
         memory_block = self.memory_manager.load_relevant([]) if self.memory_manager else ""
