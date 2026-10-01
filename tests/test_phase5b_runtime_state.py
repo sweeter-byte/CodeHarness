@@ -149,6 +149,9 @@ def test_two_agents_have_distinct_default_session_stats():
     a = _bare_agent(agent_module)
     b = _bare_agent(agent_module)
     assert a.session_stats is not b.session_stats
+    assert a.local_stats is not a.session_stats
+    assert b.local_stats is not b.session_stats
+    assert a.local_stats is not b.local_stats
     assert a.session_stats["tool_calls"] == 0
 
 
@@ -185,6 +188,33 @@ def test_token_accumulation_writes_agent_session_stats():
     assert a.session_stats["prompt_tokens"] == 5
     assert a.session_stats["completion_tokens"] == 7
     assert a.session_stats["total_tokens"] == 12
+
+
+def test_token_accumulation_updates_distinct_local_and_aggregate_stats():
+    from codeharness.core import agent as agent_module
+    from codeharness.hooks import new_session_stats
+
+    aggregate = new_session_stats()
+    a = _bare_agent(agent_module, session_stats=aggregate)
+    response = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+    )
+
+    a._accumulate_tokens(response)
+
+    assert a.local_stats is not a.session_stats
+    assert a.local_stats == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "tool_calls": 0,
+    }
+    assert aggregate == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "tool_calls": 0,
+    }
 
 
 # ── 4,5,6: two Runtimes do not share state ────────────────────

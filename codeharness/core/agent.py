@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from collections.abc import Callable
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
@@ -29,6 +30,7 @@ class Agent:
                  memory_manager: MemoryManager = None,
                  background_manager: BackgroundManager = None,
                  session_stats: dict = None,
+                 session_stats_lock: threading.RLock = None,
                  interactive: bool = True,
                  client=None,
                  model: str = None,
@@ -82,8 +84,14 @@ class Agent:
         self.todo_manager = todo_manager if todo_manager is not None else TodoManager()
         self.background_manager = background_manager if background_manager is not None \
             else BackgroundManager()
+        # Every Agent owns local usage while session_stats remains the Runtime
+        # aggregate shared by all Agents it creates.  The objects are always
+        # distinct, including for a standalone Agent.
+        self.local_stats = new_session_stats()
         self.session_stats = session_stats if session_stats is not None \
             else new_session_stats()
+        self.session_stats_lock = session_stats_lock if session_stats_lock is not None \
+            else threading.RLock()
         self._tool_executor = ToolExecutor(trigger_hooks)
 
         # When no explicit tool set is supplied, build a fresh registry bound
@@ -130,11 +138,16 @@ class Agent:
             self.status_handler(message)
 
     def _accumulate_tokens(self, response):
-        """Add token usage from an LLM response to this Agent's session stats."""
+        """Add one LLM response to Agent-local and Runtime aggregate usage."""
         if response.usage:
-            self.session_stats["prompt_tokens"] += response.usage.prompt_tokens
-            self.session_stats["completion_tokens"] += response.usage.completion_tokens
-            self.session_stats["total_tokens"] += response.usage.total_tokens
+            usage = response.usage
+            self.local_stats["prompt_tokens"] += usage.prompt_tokens
+            self.local_stats["completion_tokens"] += usage.completion_tokens
+            self.local_stats["total_tokens"] += usage.total_tokens
+            with self.session_stats_lock:
+                self.session_stats["prompt_tokens"] += usage.prompt_tokens
+                self.session_stats["completion_tokens"] += usage.completion_tokens
+                self.session_stats["total_tokens"] += usage.total_tokens
 
     def _call_llm(self, messages: list):
         """Single LLM call; accumulates tokens automatically."""

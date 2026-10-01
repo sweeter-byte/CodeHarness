@@ -99,14 +99,14 @@ def compute_stable_key(
 class WorkflowStateStore:
 	"""File-backed persistence for Workflow run state.
 
-	Thread-safe: a per-run lock protects journal appends; snapshots use
-	atomic file replacement.
+	Thread-safe: a per-run re-entrant lock protects snapshot writes and
+	journal appends; snapshots additionally use atomic file replacement.
 	"""
 
 	def __init__(self, base_dir: Path):
 		self.base_dir = Path(base_dir)
 		self.base_dir.mkdir(parents=True, exist_ok=True)
-		self._locks: dict[str, threading.Lock] = {}
+		self._locks: dict[str, threading.RLock] = {}
 		self._meta_lock = threading.Lock()
 
 	# ── Run ID generation ──
@@ -125,26 +125,28 @@ class WorkflowStateStore:
 		d.mkdir(parents=True, exist_ok=True)
 		return d
 
-	def _get_lock(self, run_id: str) -> threading.Lock:
+	def _get_lock(self, run_id: str) -> threading.RLock:
 		with self._meta_lock:
 			if run_id not in self._locks:
-				self._locks[run_id] = threading.Lock()
+				self._locks[run_id] = threading.RLock()
 			return self._locks[run_id]
 
 	# ── Snapshot CRUD ──
 
 	def save_snapshot(self, snapshot: RunSnapshot) -> None:
-		"""Atomic write: temp file + os.replace."""
-		run_dir = self._ensure_run_dir(snapshot.run_id)
-		path = run_dir / "snapshot.json"
-		snapshot.updated_at = time.time()
-		data = asdict(snapshot)
-		tmp = path.with_suffix(".json.tmp")
-		tmp.write_text(
-			json.dumps(data, indent=2, ensure_ascii=False),
-			encoding="utf-8",
-		)
-		os.replace(tmp, path)
+		"""Serialize same-run writes, then atomically replace the snapshot."""
+		lock = self._get_lock(snapshot.run_id)
+		with lock:
+			run_dir = self._ensure_run_dir(snapshot.run_id)
+			path = run_dir / "snapshot.json"
+			snapshot.updated_at = time.time()
+			data = asdict(snapshot)
+			tmp = path.with_suffix(".json.tmp")
+			tmp.write_text(
+				json.dumps(data, indent=2, ensure_ascii=False),
+				encoding="utf-8",
+			)
+			os.replace(tmp, path)
 
 	def load_snapshot(self, run_id: str) -> RunSnapshot | None:
 		path = self._run_dir(run_id) / "snapshot.json"

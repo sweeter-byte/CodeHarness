@@ -70,6 +70,10 @@ class WorkflowBudgetExceeded(WorkflowError):
 	"""Raised when agent call count or token budget is exhausted."""
 
 
+class WorkflowCancelled(WorkflowError):
+	"""Raised when a user or Runtime cancellation stops workflow execution."""
+
+
 class WorkflowTimeout(WorkflowError):
 	"""Raised when a step or the entire run exceeds its timeout."""
 
@@ -159,6 +163,7 @@ class RunHandle:
 		self.thread = thread
 		self.snapshot = snapshot
 		self.cancelled = threading.Event()
+		self.state_lock = threading.RLock()
 
 
 # ── Agent factory type ────────────────────────────────────────
@@ -224,6 +229,44 @@ class WorkflowRuntime:
 		"""Handler for async result delivery to the leader agent."""
 		self._delivery_handler = handler
 
+	# ── Live run state ──
+
+	def _get_handle(self, run_id: str) -> RunHandle | None:
+		with self._lock:
+			return self._runs.get(run_id)
+
+	def _prune_stopped_handles(self) -> None:
+		"""Remove only handles whose worker threads have fully exited."""
+		with self._lock:
+			stopped = [
+				(run_id, handle)
+				for run_id, handle in self._runs.items()
+				if not handle.thread.is_alive()
+			]
+			for run_id, handle in stopped:
+				if self._runs.get(run_id) is handle:
+					self._runs.pop(run_id, None)
+
+	def _persist_snapshot_locked(self, handle: RunHandle) -> None:
+		"""Persist handle.snapshot while the caller holds state_lock.
+
+		Lock ordering is always RunHandle.state_lock followed by the
+		WorkflowStateStore's per-run RLock.
+		"""
+		self._store.save_snapshot(handle.snapshot)
+		self._store.update_index(handle.snapshot)
+
+	@staticmethod
+	def _raise_if_cancelled(handle: RunHandle) -> None:
+		if handle.cancelled.is_set():
+			raise WorkflowCancelled("Workflow cancelled")
+
+	def _mark_cancelled_locked(self, handle: RunHandle, reason: str) -> None:
+		handle.cancelled.set()
+		handle.snapshot.status = RunStatus.CANCELLED.value
+		handle.snapshot.error = reason
+		self._persist_snapshot_locked(handle)
+
 	# ── Public API ──
 
 	def start(
@@ -234,6 +277,7 @@ class WorkflowRuntime:
 		parent_run_id: str | None = None,
 	) -> tuple[str | None, str | None]:
 		"""Start a new workflow run. Returns (run_id, None) or (None, error)."""
+		self._prune_stopped_handles()
 		if self._registry is None:
 			return None, "Error: workflow registry not configured"
 		if self._agent_factory is None:
@@ -283,6 +327,7 @@ class WorkflowRuntime:
 
 	def resume(self, run_id: str) -> tuple[str | None, str | None]:
 		"""Resume a failed/interrupted run. Returns (run_id, None) or (None, error)."""
+		self._prune_stopped_handles()
 		if self._registry is None:
 			return None, "Error: workflow registry not configured"
 		if self._agent_factory is None:
@@ -330,6 +375,7 @@ class WorkflowRuntime:
 
 	def status(self, run_id: str | None = None) -> dict[str, Any]:
 		"""Query run status. If run_id is None, list all runs."""
+		self._prune_stopped_handles()
 		if run_id is None:
 			runs = self._store.list_runs()
 			return {
@@ -359,41 +405,57 @@ class WorkflowRuntime:
 
 	def cancel(self, run_id: str) -> str:
 		"""Request cancellation of a running workflow."""
-		with self._lock:
-			handle = self._runs.get(run_id)
+		self._prune_stopped_handles()
+		handle = self._get_handle(run_id)
 		if handle is None:
 			return f"Error: run '{run_id}' not found or not active"
+		# Set the event before waiting for state_lock so a worker about to commit
+		# a terminal result observes cancellation first.
 		handle.cancelled.set()
-		snapshot = self._store.load_snapshot(run_id)
-		if snapshot:
-			snapshot.status = RunStatus.CANCELLED.value
-			snapshot.error = "Cancelled by user"
-			self._store.save_snapshot(snapshot)
-			self._store.update_index(snapshot)
+		with handle.state_lock:
+			if handle.snapshot.status in (
+				RunStatus.COMPLETED.value,
+				RunStatus.FAILED.value,
+			):
+				return f"Error: run '{run_id}' is already terminal"
+			self._mark_cancelled_locked(handle, "Cancelled by user")
 		return f"Run '{run_id}' cancellation requested"
 
 	def shutdown_all(self, timeout: float = 5.0) -> bool:
-		"""Cancel all running workflows and wait for threads to exit."""
+		"""Cancel workflows, retaining live handles so shutdown is retryable."""
+		self._prune_stopped_handles()
 		with self._lock:
 			handles = list(self._runs.values())
 
 		for handle in handles:
 			handle.cancelled.set()
+		for handle in handles:
+			with handle.state_lock:
+				if handle.snapshot.status not in (
+					RunStatus.COMPLETED.value,
+					RunStatus.FAILED.value,
+					RunStatus.CANCELLED.value,
+				):
+					self._mark_cancelled_locked(
+						handle, "Cancelled by Runtime shutdown"
+					)
+				else:
+					handle.cancelled.set()
 
 		deadline = time.monotonic() + max(0.0, timeout)
-		all_stopped = True
 		for handle in handles:
 			remaining = max(0.0, deadline - time.monotonic())
 			if handle.thread.is_alive():
 				handle.thread.join(timeout=remaining)
-			if handle.thread.is_alive():
-				all_stopped = False
-			else:
-				self._store.release_run_lock(handle.run_id)
 
 		with self._lock:
-			self._runs.clear()
-		return all_stopped
+			for handle in handles:
+				if (
+					not handle.thread.is_alive()
+					and self._runs.get(handle.run_id) is handle
+				):
+					self._runs.pop(handle.run_id, None)
+			return not any(handle.thread.is_alive() for handle in handles)
 
 	# ── Internal: Workflow Execution ──────────────────────────
 
@@ -405,11 +467,12 @@ class WorkflowRuntime:
 		depth: int,
 	) -> None:
 		"""Main execution loop — runs in a daemon thread."""
-		snapshot = self._store.load_snapshot(run_id) or RunSnapshot(
-			run_id=run_id,
-			workflow_name=definition.name,
-			inputs=inputs,
-		)
+		handle = self._get_handle(run_id)
+		if handle is None:
+			self._store.release_run_lock(run_id)
+			return
+		# A live run has exactly one in-memory snapshot, owned by its handle.
+		snapshot = handle.snapshot
 		journal = self._store.load_journal(run_id)
 		context = WorkflowContext(inputs)
 		config = definition.config
@@ -419,31 +482,30 @@ class WorkflowRuntime:
 		for entry in journal.values():
 			context.set(entry.label, entry.result)
 
-		snapshot.status = RunStatus.RUNNING.value
-		self._store.save_snapshot(snapshot)
-		self._store.update_index(snapshot)
-		self._bus.emit(workflow_started(run_id, definition.name))
-
 		try:
-			with self._lock:
-				handle = self._runs.get(run_id)
+			with handle.state_lock:
+				self._raise_if_cancelled(handle)
+				snapshot.status = RunStatus.RUNNING.value
+				snapshot.error = None
+				self._persist_snapshot_locked(handle)
+			self._bus.emit(workflow_started(run_id, definition.name))
 
 			for phase in definition.phases:
-				if handle and handle.cancelled.is_set():
-					raise WorkflowError("Cancelled")
+				self._raise_if_cancelled(handle)
 				if time.time() > deadline:
 					raise WorkflowTimeout(
 						f"Workflow exceeded {config.run_timeout}s timeout"
 					)
 
-				snapshot.current_phase = phase.name
-				self._store.save_snapshot(snapshot)
+				with handle.state_lock:
+					self._raise_if_cancelled(handle)
+					snapshot.current_phase = phase.name
+					self._persist_snapshot_locked(handle)
 				self._bus.emit(phase_started(run_id, phase.name))
 				print(f"\033[36m[workflow]   phase: {phase.name}\033[0m")
 
 				for step in phase.steps:
-					if handle and handle.cancelled.is_set():
-						raise WorkflowError("Cancelled")
+					self._raise_if_cancelled(handle)
 					if time.time() > deadline:
 						raise WorkflowTimeout("Workflow timeout exceeded")
 
@@ -459,17 +521,20 @@ class WorkflowRuntime:
 						depth=depth,
 						deadline=deadline,
 					)
+					self._raise_if_cancelled(handle)
 
 				self._bus.emit(phase_completed(run_id, phase.name))
 
 			# ── Completed ──
 			# Final output is the last step's result or the full context
 			final_output = self._build_final_output(context, definition)
+			self._raise_if_cancelled(handle)
 			self._store.save_output(run_id, final_output)
-			snapshot.status = RunStatus.COMPLETED.value
-			snapshot.error = None
-			self._store.save_snapshot(snapshot)
-			self._store.update_index(snapshot)
+			with handle.state_lock:
+				self._raise_if_cancelled(handle)
+				snapshot.status = RunStatus.COMPLETED.value
+				snapshot.error = None
+				self._persist_snapshot_locked(handle)
 			self._bus.emit(workflow_completed(run_id, definition.name, {
 				"agent_calls": snapshot.agent_calls_used,
 				"tokens": snapshot.tokens_used,
@@ -484,12 +549,29 @@ class WorkflowRuntime:
 			self._deliver_completion(run_id, definition.name, snapshot)
 
 		except Exception as exc:
-			snapshot.status = RunStatus.FAILED.value
-			snapshot.error = str(exc)
-			self._store.save_snapshot(snapshot)
-			self._store.update_index(snapshot)
-			self._bus.emit(workflow_failed(run_id, definition.name, str(exc)))
-			print(f"\033[31m[workflow] ✗ {definition.name} failed ({run_id}): {exc}\033[0m")
+			cancelled = (
+				isinstance(exc, WorkflowCancelled)
+				or handle.cancelled.is_set()
+			)
+			with handle.state_lock:
+				if cancelled:
+					snapshot.status = RunStatus.CANCELLED.value
+					snapshot.error = snapshot.error or "Workflow cancelled"
+				else:
+					snapshot.status = RunStatus.FAILED.value
+					snapshot.error = str(exc)
+				self._persist_snapshot_locked(handle)
+			if cancelled:
+				print(
+					f"\033[33m[workflow] ■ {definition.name} cancelled "
+					f"({run_id})\033[0m"
+				)
+			else:
+				self._bus.emit(workflow_failed(run_id, definition.name, str(exc)))
+				print(
+					f"\033[31m[workflow] ✗ {definition.name} failed "
+					f"({run_id}): {exc}\033[0m"
+				)
 
 		finally:
 			self._store.release_run_lock(run_id)
@@ -558,30 +640,35 @@ class WorkflowRuntime:
 		item_id: str = "",
 	) -> Any:
 		"""Execute one agent step: check journal → budget → run agent → validate."""
+		handle = self._get_handle(run_id)
+		if handle is None or handle.snapshot is not snapshot:
+			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
 		prompt = context.render(step.prompt_template)
 		schema_json = json.dumps(step.output_schema, sort_keys=True) if step.output_schema else ""
 		key = compute_stable_key("agent", step.label, prompt, schema_json, item_id)
 
-		# Journal cache hit (Resume)
-		if key in journal:
-			cached = journal[key]
+		# Journal lookup and budget guards share the same run-state boundary.
+		with handle.state_lock:
+			self._raise_if_cancelled(handle)
+			cached = journal.get(key)
+			if cached is None:
+				if snapshot.agent_calls_used >= config.max_agent_calls:
+					raise WorkflowBudgetExceeded(
+						f"Agent call limit reached ({config.max_agent_calls})"
+					)
+				# This is a usage guard, not a strict token reservation quota:
+				# already-running Agents may collectively cross the limit.
+				if snapshot.tokens_used >= config.max_token_budget:
+					raise WorkflowBudgetExceeded(
+						f"Token budget exhausted ({config.max_token_budget})"
+					)
+		if cached is not None:
 			self._bus.emit(step_resumed(run_id, phase_name, step.label))
 			print(f"\033[36m[workflow]     ↺ {step.label} (cached)\033[0m")
 			return cached.result
 
-		# Budget checks
-		if snapshot.agent_calls_used >= config.max_agent_calls:
-			raise WorkflowBudgetExceeded(
-				f"Agent call limit reached ({config.max_agent_calls})"
-			)
-		if snapshot.tokens_used >= config.max_token_budget:
-			raise WorkflowBudgetExceeded(
-				f"Token budget exhausted ({config.max_token_budget})"
-			)
 		if time.time() > deadline:
 			raise WorkflowTimeout(f"Step '{step.label}' skipped: workflow timeout")
-
-		self._bus.emit(step_started(run_id, phase_name, step.label))
 
 		# Build agent
 		system = step.system_prompt or WORKFLOW_AGENT_SYSTEM
@@ -613,35 +700,64 @@ class WorkflowRuntime:
 			agent_kwargs["tools"] = filtered_schemas
 			agent_kwargs["handlers"] = filtered_handlers
 
-		start_time = time.time()
 		agent = self._agent_factory(**agent_kwargs)
 		messages = [{"role": "user", "content": prompt}]
 
+		# Recheck after Agent construction, then reserve immediately before the
+		# attempt starts.  The lock is released before agent_loop/LLM/tool work.
+		with handle.state_lock:
+			self._raise_if_cancelled(handle)
+			cached = journal.get(key)
+			if cached is not None:
+				self._bus.emit(step_resumed(run_id, phase_name, step.label))
+				return cached.result
+			if snapshot.agent_calls_used >= config.max_agent_calls:
+				raise WorkflowBudgetExceeded(
+					f"Agent call limit reached ({config.max_agent_calls})"
+				)
+			if snapshot.tokens_used >= config.max_token_budget:
+				raise WorkflowBudgetExceeded(
+					f"Token budget exhausted ({config.max_token_budget})"
+				)
+			if time.time() > deadline:
+				raise WorkflowTimeout(
+					f"Step '{step.label}' skipped: workflow timeout"
+				)
+			snapshot.agent_calls_used += 1
+			self._persist_snapshot_locked(handle)
+
+		self._bus.emit(step_started(run_id, phase_name, step.label))
+		start_time = time.time()
 		try:
 			raw_result = agent.agent_loop(messages) or ""
+			self._raise_if_cancelled(handle)
+
+			# Structured output retries use the same Agent, so local_stats includes
+			# every response generated by this AgentStep attempt.
+			result = raw_result
+			if step.output_schema:
+				result = self._validate_output(
+					raw_result, step.output_schema, step, agent, messages,
+					run_id, phase_name
+				)
+			self._raise_if_cancelled(handle)
 		except Exception as exc:
+			tokens = getattr(agent, "local_stats", {}).get("total_tokens", 0)
+			with handle.state_lock:
+				snapshot.tokens_used += tokens
+				self._persist_snapshot_locked(handle)
+				cancelled = (
+					isinstance(exc, WorkflowCancelled)
+					or handle.cancelled.is_set()
+				)
+			if cancelled:
+				raise WorkflowCancelled("Workflow cancelled") from exc
 			self._bus.emit(step_failed(run_id, phase_name, step.label, str(exc)))
 			raise WorkflowError(f"AgentStep '{step.label}' failed: {exc}") from exc
 
 		elapsed = time.time() - start_time
-		tokens = agent.session_stats.get("total_tokens", 0)
+		tokens = getattr(agent, "local_stats", {}).get("total_tokens", 0)
 
-		# Structured output validation
-		result = raw_result
-		if step.output_schema:
-			result = self._validate_output(
-				raw_result, step.output_schema, step, agent, messages, run_id, phase_name
-			)
-
-		# Update snapshot counters
-		snapshot.agent_calls_used += 1
-		snapshot.tokens_used += tokens
-		if step.label not in snapshot.completed_steps:
-			snapshot.completed_steps.append(step.label)
-		self._store.save_snapshot(snapshot)
-		self._store.update_index(snapshot)
-
-		# Journal persist
 		entry = JournalEntry(
 			stable_key=key,
 			label=step.label,
@@ -650,8 +766,16 @@ class WorkflowRuntime:
 			result=result,
 			tokens_used=tokens,
 		)
-		self._store.append_journal(run_id, entry)
-		journal[key] = entry
+		with handle.state_lock:
+			snapshot.tokens_used += tokens
+			if handle.cancelled.is_set():
+				self._persist_snapshot_locked(handle)
+				raise WorkflowCancelled("Workflow cancelled")
+			if step.label not in snapshot.completed_steps:
+				snapshot.completed_steps.append(step.label)
+			self._persist_snapshot_locked(handle)
+			self._store.append_journal(run_id, entry)
+			journal[key] = entry
 
 		self._bus.emit(step_completed(run_id, phase_name, step.label, {
 			"tokens": tokens, "elapsed": round(elapsed, 1)
@@ -954,9 +1078,14 @@ class WorkflowRuntime:
 			)
 
 		# Propagate nested resource usage
-		snapshot.agent_calls_used += nested_snapshot.agent_calls_used
-		snapshot.tokens_used += nested_snapshot.tokens_used
-		self._store.save_snapshot(snapshot)
+		handle = self._get_handle(run_id)
+		if handle is None or handle.snapshot is not snapshot:
+			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
+		with handle.state_lock:
+			self._raise_if_cancelled(handle)
+			snapshot.agent_calls_used += nested_snapshot.agent_calls_used
+			snapshot.tokens_used += nested_snapshot.tokens_used
+			self._persist_snapshot_locked(handle)
 
 		output = self._store.load_output(nested_run_id)
 		self._bus.emit(step_completed(run_id, phase_name, step.label, {

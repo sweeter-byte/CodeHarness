@@ -71,6 +71,7 @@ class CodeHarness:
         self.todo_manager = None
         self.background_manager = None
         self.session_stats = new_session_stats()
+        self._session_stats_lock = threading.RLock()
         self._turn_lock = threading.Lock()
         self._user_turn_pending = threading.Event()
         self._closing = threading.Event()
@@ -115,6 +116,7 @@ class CodeHarness:
             "approval_handler": self.approval_handler,
             "status_handler": self.status_handler,
             "session_stats": self.session_stats,
+            "session_stats_lock": self._session_stats_lock,
             "workflow_catalog": self.workflow_registry.catalog(),
         }
         defaults.update(kwargs)

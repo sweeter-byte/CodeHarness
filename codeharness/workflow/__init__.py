@@ -20,6 +20,7 @@ from codeharness.workflow.registry import (
 )
 from codeharness.workflow.runtime import (
 	WorkflowBudgetExceeded,
+	WorkflowCancelled,
 	WorkflowError,
 	WorkflowRuntime,
 	WorkflowTimeout,
@@ -54,6 +55,7 @@ __all__ = [
 	"WorkflowRuntime",
 	"WorkflowError",
 	"WorkflowBudgetExceeded",
+	"WorkflowCancelled",
 	"WorkflowTimeout",
 	# State
 	"WorkflowStateStore",

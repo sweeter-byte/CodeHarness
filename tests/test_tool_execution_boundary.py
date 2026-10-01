@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from codeharness.tools.executor import ToolExecutor
 from codeharness.workflow.definition import AgentStep, ToolStep, WorkflowConfig
 from codeharness.workflow.registry import WorkflowRegistry as WorkflowDefinitionRegistry
 from codeharness.workflow.runtime import (
+    RunHandle,
     WorkflowContext,
     WorkflowError,
     WorkflowRuntime,
@@ -317,6 +319,7 @@ def test_workflow_agent_whitelist_uses_current_runtime_registry():
 
     class FakeAgent:
         def __init__(self):
+            self.local_stats = {"total_tokens": 0}
             self.session_stats = {"total_tokens": 0}
 
         def agent_loop(self, _messages):
@@ -336,6 +339,9 @@ def test_workflow_agent_whitelist_uses_current_runtime_registry():
         tokens_used=0,
         completed_steps=[],
     )
+    handle = RunHandle("run-id", threading.current_thread(), snapshot)
+    with runtime._lock:
+        runtime._runs[handle.run_id] = handle
 
     runtime._execute_agent_step(
         AgentStep(
