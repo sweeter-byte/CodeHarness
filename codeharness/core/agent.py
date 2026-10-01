@@ -5,6 +5,7 @@ from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
 from codeharness import hooks
 from codeharness.hooks import new_session_stats, trigger_hooks
+from codeharness.tools.executor import ToolExecutor
 from codeharness.context.budget import ContextBudget
 from codeharness.context.token_counter import TokenCounter
 from codeharness.context.manager import ContextManager
@@ -81,6 +82,7 @@ class Agent:
             else BackgroundManager()
         self.session_stats = session_stats if session_stats is not None \
             else new_session_stats()
+        self._tool_executor = ToolExecutor(trigger_hooks)
 
         # When no explicit tool set is supplied, build a fresh registry bound
         # to THIS Agent's TodoManager so todo_write and self.todo_manager share
@@ -149,76 +151,39 @@ class Agent:
         Run PreToolUse hooks → execute (or skip) → run PostToolUse hooks.
         Returns True if the tool actually executed, False if blocked/rejected.
         """
-        # Reset the "ask user" flag before each tool call.
-        hooks.PENDING_USER_ASK.value = None
+        result = self._tool_executor.execute(
+            tool_name=tool_name,
+            args=args,
+            handler=handler,
+            interactive=self.interactive,
+            approval_handler=self.approval_handler,
+            session_stats=self.session_stats,
+        )
 
-        # ── PreToolUse ──
-        hook_result = trigger_hooks("PreToolUse", tool_name, args)
-
-        if hook_result is not None:
-            # A hook returned non-None → execution blocked.
-            output = hook_result
-            self._emit_status(f"\033[31m✗ BLOCKED {tool_name}: {output}\033[0m")
-            executed = False
-        elif hooks.PENDING_USER_ASK.value is not None:
-            # Permission hook flagged "ask" → prompt the user.
-            reason = hooks.PENDING_USER_ASK.value
-            hooks.PENDING_USER_ASK.value = None
+        if result.status == "blocked":
+            self._emit_status(
+                f"\033[31m✗ BLOCKED {tool_name}: {result.output}\033[0m"
+            )
+        elif result.status == "approval_unavailable":
             if not self.interactive:
-                # Non-interactive (teammate) mode: never touch the terminal.
-                # Dangerous operations are escalated to the leader via send_message.
-                output = (
-                    f"Error: This operation requires user approval, which is "
-                    f"not available for teammates - {reason}. Do NOT retry. "
-                    "Report the blocker to your leader via send_message, or "
-                    "adjust your approach to avoid this operation."
-                )
                 self._emit_status(
-                    f"\033[31m  ✗ [non-interactive] rejected: {reason}\033[0m"
+                    f"\033[31m  ✗ [non-interactive] rejected: "
+                    f"{result.reason}\033[0m"
                 )
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": output,
-                })
-                return False
-            if self.approval_handler is None:
-                output = (
-                    "Error: This operation requires user approval, but no "
-                    "approval handler is configured. Operation rejected."
-                )
-                self._emit_status(
-                    f"\033[31m  ✗ Approval unavailable; rejected: {reason}\033[0m"
-                )
-                executed = False
-            elif not self.approval_handler(reason):
-                output = (
-                    "Error: User rejected this operation. "
-                    "Do NOT retry via alternative commands or paths. "
-                    "If you cannot complete the task without this operation, "
-                    "report what you have done and stop."
-                )
-                self._emit_status("\033[31m  ✗ Rejected by user\033[0m")
-                executed = False
             else:
-                output = handler(**args)
-                executed = True
-        else:
-            # All hooks passed.
-            output = handler(**args)
-            executed = True
-
-        # ── PostToolUse ──
-        if executed:
-            self.session_stats["tool_calls"] += 1
-            trigger_hooks("PostToolUse", tool_name, args, output)
+                self._emit_status(
+                    f"\033[31m  ✗ Approval unavailable; rejected: "
+                    f"{result.reason}\033[0m"
+                )
+        elif result.status == "rejected":
+            self._emit_status("\033[31m  ✗ Rejected by user\033[0m")
 
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "content": output,
+            "content": result.output,
         })
-        return executed
+        return result.executed
 
     def agent_loop(self, messages: list) -> str:
         """Run until a final answer / rejection-stop / max_rounds.
@@ -363,4 +328,3 @@ class Agent:
                         rounds_since_todo = 0
         finally:
             self.background_manager.cancel_all()
-

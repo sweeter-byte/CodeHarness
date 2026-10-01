@@ -156,7 +156,6 @@ class CodeHarness:
         register_builtin_workflows(WORKFLOWS)
         registry.extend(WORKFLOW_TOOLS, WORKFLOW_HANDLERS)
         WORKFLOW_RUNTIME.set_agent_factory(self.create_agent)
-        WORKFLOW_RUNTIME.set_tool_resolver(registry.get)
         WORKFLOW_RUNTIME.set_registry(WORKFLOWS)
 
         try:
@@ -178,6 +177,7 @@ class CodeHarness:
             self.mcp_manager.resolve,
             self.mcp_manager.annotations_of,
         )
+        WORKFLOW_RUNTIME.set_tool_registry(registry)
 
         self.registry = registry
         self.agent = self.create_agent(
@@ -398,7 +398,7 @@ class CodeHarness:
 
         try:
             WORKFLOW_RUNTIME.set_agent_factory(None)
-            WORKFLOW_RUNTIME.set_tool_resolver(None)
+            WORKFLOW_RUNTIME.set_tool_registry(None)
             WORKFLOW_RUNTIME.set_delivery_handler(None)
             WORKFLOW_RUNTIME.set_registry(None)
         except Exception:

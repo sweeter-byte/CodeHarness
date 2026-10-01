@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any
 
+from codeharness.tools.executor import ToolExecutor
 from codeharness.workflow.definition import (
 	AgentStep,
 	ParallelStep,
@@ -197,6 +198,8 @@ class WorkflowRuntime:
 		self._lock = threading.Lock()
 		self._agent_factory: AgentFactory | None = None
 		self._tool_resolver: ToolResolver | None = None
+		self._tool_registry = None
+		self._tool_executor = ToolExecutor()
 		self._delivery_handler: DeliveryHandler | None = None
 		self._registry = None  # set lazily to avoid circular import
 
@@ -207,7 +210,13 @@ class WorkflowRuntime:
 
 	def set_tool_resolver(self, resolver: ToolResolver | None) -> None:
 		"""Inject a callable that resolves tool_name → handler."""
+		self._tool_registry = None
 		self._tool_resolver = resolver
+
+	def set_tool_registry(self, registry) -> None:
+		"""Inject the Runtime-assembled schema/handler registry."""
+		self._tool_registry = registry
+		self._tool_resolver = registry.get if registry is not None else None
 
 	def set_delivery_handler(self, handler: DeliveryHandler | None) -> None:
 		"""Handler for async result delivery to the leader agent."""
@@ -585,10 +594,15 @@ class WorkflowRuntime:
 		}
 
 		# Tool filtering
-		if step.tools is not None and self._tool_resolver is not None:
-			# Build a filtered tool set — only whitelisted tools
-			from codeharness.tools import build_base_registry
-			registry = build_base_registry()
+		if step.tools is not None:
+			if self._tool_registry is None:
+				raise WorkflowError(
+					f"AgentStep '{step.label}' cannot resolve its tool "
+					"whitelist: Runtime ToolRegistry is not configured"
+				)
+			# Filter the already-assembled Runtime registry so workspace-bound
+			# native handlers, MCP tools, and Runtime-owned state are retained.
+			registry = self._tool_registry
 			filtered_schemas = [
 				s for s in registry.schemas
 				if s["function"]["name"] in step.tools
@@ -678,7 +692,13 @@ class WorkflowRuntime:
 
 		start_time = time.time()
 		try:
-			result = handler(**args)
+			execution = self._tool_executor.execute(
+				tool_name=step.tool_name,
+				args=args,
+				handler=handler,
+				interactive=False,
+				approval_context="workflow",
+			)
 		except Exception as exc:
 			elapsed = time.time() - start_time
 			if step.allow_failure:
@@ -694,6 +714,24 @@ class WorkflowRuntime:
 			raise WorkflowError(
 				f"ToolStep '{step.label}' failed: {exc}"
 			) from exc
+
+		if not execution.executed:
+			error_msg = (
+				f"ToolStep '{step.label}' blocked: {execution.output}"
+			)
+			if step.allow_failure:
+				self._bus.emit(step_completed(run_id, phase_name, step.label, {
+					"error": execution.output,
+					"allowed_failure": True,
+				}))
+				return {
+					"output": execution.output,
+					"error": execution.output,
+					"exit_code": -1,
+				}
+			raise WorkflowError(error_msg)
+
+		result = execution.output
 
 		elapsed = time.time() - start_time
 		self._bus.emit(step_completed(run_id, phase_name, step.label, {
