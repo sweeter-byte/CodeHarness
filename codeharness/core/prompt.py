@@ -7,12 +7,22 @@ from codeharness.skills.tools import SKILL_LOADER
 TODO_TOOL_NAME = "todo_write"
 
 
+def _workflow_catalog() -> str:
+	"""Lazily import and return the workflow catalog (avoids circular imports)."""
+	try:
+		from codeharness.workflow import WORKFLOWS
+		return WORKFLOWS.catalog()
+	except Exception:
+		return "(no workflows available)"
+
+
 def build_default_system_prompt(
     workspace: str | Path,
     skill_catalog: str | None = None,
 ) -> str:
     """Build the legacy default prompt without changing its semantics."""
     catalog = SKILL_LOADER.catalog() if skill_catalog is None else skill_catalog
+    wf_catalog = _workflow_catalog()
     return (
         f"You are a coding agent at {workspace}. Use tools to solve tasks. Act, don't explain.\n"
         f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
@@ -31,6 +41,11 @@ def build_default_system_prompt(
         "send_message for direct instructions, shutdown_teammate when done, then "
         "remove_worktree and reset_tasks to clean up. Worktrees isolate git working "
         "directories only — they are NOT a security sandbox.\n\n"
+        "For fixed multi-step processes (code review, validation, test triage, "
+        "benchmarks), use start_workflow(name, inputs) instead of manual orchestration. "
+        "Workflows run asynchronously with deterministic control flow, structured "
+        "outputs, and resume support. Check progress with workflow_status(run_id).\n\n"
+        f"Available Workflows:\n{wf_catalog}\n\n"
         f"Skills available:\n{catalog}\n\n"
         "Use load_skill to read the full instructions when a skill applies."
     )

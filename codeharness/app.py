@@ -16,6 +16,13 @@ from codeharness.subagent import (
 from codeharness.tasks import TASK_HANDLERS as TASK_SYS_HANDLERS, TASK_TOOLS
 from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
 from codeharness.team import wakeup as team_wakeup
+from codeharness.workflow import (
+    WORKFLOWS,
+    WORKFLOW_HANDLERS,
+    WORKFLOW_RUNTIME,
+    WORKFLOW_TOOLS,
+)
+from codeharness.workflow.builtin import register_builtins as register_builtin_workflows
 
 from codeharness.config import RuntimeConfig
 from codeharness.core.agent import Agent
@@ -56,6 +63,7 @@ class CodeHarness:
         self._closed = False
         self._cron_started = False
         self._team_wakeup_started = False
+        self._workflow_started = False
 
     @classmethod
     def from_env(cls) -> "CodeHarness":
@@ -131,6 +139,13 @@ class CodeHarness:
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
         registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
 
+        # ── Workflow Runtime ──
+        register_builtin_workflows(WORKFLOWS)
+        registry.extend(WORKFLOW_TOOLS, WORKFLOW_HANDLERS)
+        WORKFLOW_RUNTIME.set_agent_factory(self.create_agent)
+        WORKFLOW_RUNTIME.set_tool_resolver(registry.get)
+        WORKFLOW_RUNTIME.set_registry(WORKFLOWS)
+
         try:
             mcp_configs = load_config(self.config.mcp_config_path)
         except MCPConfigError as exc:
@@ -170,6 +185,8 @@ class CodeHarness:
             delivery_handler=self._try_deliver_async,
             status_handler=self._emit_status,
         )
+        WORKFLOW_RUNTIME.set_delivery_handler(self._try_deliver_async)
+        self._workflow_started = True
         self._closing.clear()
         self._started = True
         return self
@@ -338,7 +355,15 @@ class CodeHarness:
             team_stopped = TEAM.shutdown_all(timeout=CLOSE_TIMEOUT)
         except Exception:
             team_stopped = False
-        if not (cron_stopped and wakeup_stopped and team_stopped):
+
+        try:
+            workflow_stopped = WORKFLOW_RUNTIME.shutdown_all(timeout=CLOSE_TIMEOUT)
+        except Exception:
+            workflow_stopped = False
+        if self._workflow_started and workflow_stopped:
+            self._workflow_started = False
+
+        if not (cron_stopped and wakeup_stopped and team_stopped and workflow_stopped):
             return False
 
         try:
@@ -354,6 +379,14 @@ class CodeHarness:
 
         try:
             TEAM.set_agent_factory(None)
+        except Exception:
+            pass
+
+        try:
+            WORKFLOW_RUNTIME.set_agent_factory(None)
+            WORKFLOW_RUNTIME.set_tool_resolver(None)
+            WORKFLOW_RUNTIME.set_delivery_handler(None)
+            WORKFLOW_RUNTIME.set_registry(None)
         except Exception:
             pass
 

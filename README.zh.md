@@ -390,3 +390,100 @@ Teammate 的上下文（messages）在内存中，崩溃即丢失，“复活”
 
 ## MCP Server
 
+
+
+
+## Workflow Runtime
+
+将常用的一些较为确定的流程固定,不需要LLM给出顺序.当前实现下面五个Workflow:
+
+- review-changes:获取 diff → 多维审查 → 验证 finding → 去重 → 严重度排序 → 报告
+```text
+Changed Code
+     ↓
+┌────────────┬────────────┬────────────┬────────────┐
+Correctness  Security     Performance  Maintainability
+└────────────┴────────────┴────────────┴────────────┘
+     ↓
+Verify Findings
+     ↓
+Deduplicate
+     ↓
+Severity Sort
+     ↓
+Review Report
+```
+
+- validate-changes:获取改动 → lint/typecheck/test/build 并行执行 → 汇总失败 → 输出验证报告
+```text
+获取 Changed Files
+        ↓
+┌─────────┬───────────┬──────────┬─────────┐
+ Lint     Type Check     Tests      Build
+└─────────┴───────────┴──────────┴─────────┘
+        ↓
+Collect Results
+        ↓
+Classification
+        ↓
+Validation Report
+
+```
+
+- test-triage:运行测试 → 收集失败项 → 分类失败 → 并行分析 → 汇总可能原因
+```text
+Run Tests
+    ↓
+Collect Failures
+    ↓
+Group Failures
+    ↓
+Parallel Analysis
+    ↓
+Root Cause Candidates
+    ↓
+Triage Report
+
+```
+
+- benchmark-agent:加载评测集 → 并行运行 case → 收集结果 → 计算指标 → 生成报告
+```text
+Load Dataset
+     ↓
+Prepare Cases
+     ↓
+Run Agent on Cases
+     ↓
+Collect Traces / Results
+     ↓
+Evaluate
+     ↓
+Aggregate Metrics
+     ↓
+Generate Report
+```
+
+- pr-review:GitHub MCP 读取 PR/diff → Review Workflow → 结构化审查报告
+
+```text
+pr-review
+    │
+    ├── GitHub MCP：读取 PR metadata
+    ├── GitHub MCP：获取 diff
+    │
+    └── workflow("review-changes")
+                ↓
+          Structured Findings
+                ↓
+          PR Review Report
+```
+
+完成后,Agent Harness将有四种执行模型:
+```text
+CodeHarness (app.py)
+     │
+     ├── Agent Loop (core/agent.py)       → 路径未知，动态探索
+     ├── SubAgent (subagent.py)           → 单步委托，无状态
+     ├── Team (team/)                     → 持久协作，共享任务板
+     └── Workflow (workflow/)              → 路径已知，确定性编排   ← NEW
+```
