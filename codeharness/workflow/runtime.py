@@ -28,7 +28,6 @@ from codeharness.workflow.definition import (
 	AgentStep,
 	ParallelStep,
 	PipelineStep,
-	Phase,
 	Step,
 	ToolStep,
 	WorkflowConfig,
@@ -54,7 +53,10 @@ from codeharness.workflow.state import (
 	JournalEntry,
 	RunSnapshot,
 	RunStatus,
+	WorkflowRunLock,
 	WorkflowStateStore,
+	canonical_json,
+	compute_legacy_stable_key,
 	compute_stable_key,
 )
 
@@ -158,12 +160,17 @@ class RunHandle:
 	"""Tracks a live workflow run thread."""
 
 	def __init__(self, run_id: str, thread: threading.Thread,
-				 snapshot: RunSnapshot):
+				 snapshot: RunSnapshot,
+				 run_lock: WorkflowRunLock | None = None, starting: bool = False):
 		self.run_id = run_id
 		self.thread = thread
 		self.snapshot = snapshot
+		self.run_lock = run_lock
+		self.starting = starting
 		self.cancelled = threading.Event()
 		self.state_lock = threading.RLock()
+		self.journal_condition = threading.Condition(self.state_lock)
+		self.journal_claims: set[str] = set()
 
 
 # ── Agent factory type ────────────────────────────────────────
@@ -241,7 +248,7 @@ class WorkflowRuntime:
 			stopped = [
 				(run_id, handle)
 				for run_id, handle in self._runs.items()
-				if not handle.thread.is_alive()
+				if not handle.starting and not handle.thread.is_alive()
 			]
 			for run_id, handle in stopped:
 				if self._runs.get(run_id) is handle:
@@ -260,6 +267,44 @@ class WorkflowRuntime:
 	def _raise_if_cancelled(handle: RunHandle) -> None:
 		if handle.cancelled.is_set():
 			raise WorkflowCancelled("Workflow cancelled")
+
+	def _claim_journal_key(
+		self,
+		handle: RunHandle,
+		journal: dict[str, JournalEntry],
+		stable_key: str,
+		fallback_keys: tuple[str, ...] = (),
+	) -> JournalEntry | None:
+		"""Return a cache hit, or claim a miss for the current thread."""
+		with handle.journal_condition:
+			while True:
+				self._raise_if_cancelled(handle)
+				cached = None
+				for lookup_key in (stable_key, *fallback_keys):
+					cached = journal.get(lookup_key)
+					if cached is not None:
+						return cached
+				if stable_key not in handle.journal_claims:
+					handle.journal_claims.add(stable_key)
+					return None
+				handle.journal_condition.wait(timeout=0.1)
+
+	@staticmethod
+	def _release_journal_claim(handle: RunHandle, stable_key: str) -> None:
+		"""Drop an in-flight key and wake waiters on every exit path."""
+		with handle.journal_condition:
+			handle.journal_claims.discard(stable_key)
+			handle.journal_condition.notify_all()
+
+	def _publish_journal_entry(
+		self, handle: RunHandle, run_id: str,
+		journal: dict[str, JournalEntry], entry: JournalEntry,
+	) -> None:
+		"""Append and publish one successful result under the run-state lock."""
+		with handle.state_lock:
+			self._raise_if_cancelled(handle)
+			self._store.append_journal(run_id, entry)
+			journal[entry.stable_key] = entry
 
 	def _mark_cancelled_locked(self, handle: RunHandle, reason: str) -> None:
 		handle.cancelled.set()
@@ -307,20 +352,40 @@ class WorkflowRuntime:
 		self._store.update_index(snapshot)
 
 		# Acquire run lock
-		if not self._store.acquire_run_lock(run_id, definition.config.run_timeout):
+		run_lock = self._store.acquire_run_lock(run_id)
+		if run_lock is None:
 			return None, f"Error: cannot acquire lock for run {run_id}"
 
 		# Start execution thread
-		thread = threading.Thread(
-			target=self._execute_workflow,
-			args=(run_id, definition, inputs, depth),
-			daemon=True,
-			name=f"workflow-{run_id}",
-		)
-		handle = RunHandle(run_id, thread, snapshot)
-		with self._lock:
-			self._runs[run_id] = handle
-		thread.start()
+		handle: RunHandle | None = None
+		try:
+			thread = threading.Thread(
+				target=self._execute_workflow,
+				args=(run_id, definition, inputs, depth),
+				daemon=True,
+				name=f"workflow-{run_id}",
+			)
+			handle = RunHandle(run_id, thread, snapshot, run_lock, starting=True)
+			with self._lock:
+				self._runs[run_id] = handle
+			thread.start()
+			with self._lock:
+				if self._runs.get(run_id) is handle:
+					handle.starting = False
+		except Exception as exc:  # noqa: BLE001 -- pre-start cleanup boundary
+			with self._lock:
+				if self._runs.get(run_id) is handle:
+					self._runs.pop(run_id, None)
+			snapshot.status = RunStatus.FAILED.value
+			snapshot.error = f"Worker failed to start: {exc}"
+			try:
+				self._store.save_snapshot(snapshot)
+				self._store.update_index(snapshot)
+			finally:
+				run_lock.release()
+			return None, (
+				f"Error: failed to start workflow run {run_id}: {exc}"
+			)
 
 		print(f"\033[36m[workflow] ▶ {workflow_name} started ({run_id})\033[0m")
 		return run_id, None
@@ -342,33 +407,67 @@ class WorkflowRuntime:
 			# Check if it's actually still running
 			with self._lock:
 				handle = self._runs.get(run_id)
-			if handle and handle.thread.is_alive():
+			if handle and (handle.starting or handle.thread.is_alive()):
 				return None, f"Error: run '{run_id}' is still running"
+
+		# Ownership must be established before persisted state says RUNNING.
+		run_lock = self._store.acquire_run_lock(run_id)
+		if run_lock is None:
+			return None, f"Error: cannot acquire lock for run {run_id}"
+
+		# The snapshot may have changed while this process waited for ownership.
+		try:
+			snapshot = self._store.load_snapshot(run_id)
+		except Exception as exc:  # noqa: BLE001 -- ownership cleanup boundary
+			run_lock.release()
+			return None, f"Error: failed to reload run '{run_id}': {exc}"
+		if snapshot is None:
+			run_lock.release()
+			return None, f"Error: run '{run_id}' not found"
+		if snapshot.status == RunStatus.COMPLETED.value:
+			run_lock.release()
+			return None, f"Error: run '{run_id}' is already completed"
 
 		definition = self._registry.get(snapshot.workflow_name)
 		if definition is None:
+			run_lock.release()
 			return None, f"Error: workflow '{snapshot.workflow_name}' no longer registered"
 
-		# Reset status
-		snapshot.status = RunStatus.RUNNING.value
-		snapshot.error = None
-		self._store.save_snapshot(snapshot)
-
-		# Release stale lock and re-acquire
-		self._store.release_run_lock(run_id)
-		if not self._store.acquire_run_lock(run_id, definition.config.run_timeout):
-			return None, f"Error: cannot acquire lock for run {run_id}"
-
-		thread = threading.Thread(
-			target=self._execute_workflow,
-			args=(run_id, definition, snapshot.inputs, snapshot.depth),
-			daemon=True,
-			name=f"workflow-resume-{run_id}",
-		)
-		handle = RunHandle(run_id, thread, snapshot)
-		with self._lock:
-			self._runs[run_id] = handle
-		thread.start()
+		previous_status = snapshot.status
+		previous_error = snapshot.error
+		handle: RunHandle | None = None
+		try:
+			thread = threading.Thread(
+				target=self._execute_workflow,
+				args=(run_id, definition, snapshot.inputs, snapshot.depth),
+				daemon=True,
+				name=f"workflow-resume-{run_id}",
+			)
+			handle = RunHandle(run_id, thread, snapshot, run_lock, starting=True)
+			with handle.state_lock:
+				snapshot.status = RunStatus.RUNNING.value
+				snapshot.error = None
+				self._persist_snapshot_locked(handle)
+			with self._lock:
+				self._runs[run_id] = handle
+			thread.start()
+			with self._lock:
+				if self._runs.get(run_id) is handle:
+					handle.starting = False
+		except Exception as exc:  # noqa: BLE001 -- pre-start cleanup boundary
+			with self._lock:
+				if handle is not None and self._runs.get(run_id) is handle:
+					self._runs.pop(run_id, None)
+			snapshot.status = previous_status
+			snapshot.error = previous_error
+			try:
+				self._store.save_snapshot(snapshot)
+				self._store.update_index(snapshot)
+			finally:
+				run_lock.release()
+			return None, (
+				f"Error: failed to resume workflow run {run_id}: {exc}"
+			)
 
 		print(f"\033[36m[workflow] ▶ {snapshot.workflow_name} resumed ({run_id})\033[0m")
 		return run_id, None
@@ -451,11 +550,14 @@ class WorkflowRuntime:
 		with self._lock:
 			for handle in handles:
 				if (
-					not handle.thread.is_alive()
+					not handle.starting
+					and not handle.thread.is_alive()
 					and self._runs.get(handle.run_id) is handle
 				):
 					self._runs.pop(handle.run_id, None)
-			return not any(handle.thread.is_alive() for handle in handles)
+			return not any(
+				handle.starting or handle.thread.is_alive() for handle in handles
+			)
 
 	# ── Internal: Workflow Execution ──────────────────────────
 
@@ -469,20 +571,15 @@ class WorkflowRuntime:
 		"""Main execution loop — runs in a daemon thread."""
 		handle = self._get_handle(run_id)
 		if handle is None:
-			self._store.release_run_lock(run_id)
 			return
 		# A live run has exactly one in-memory snapshot, owned by its handle.
 		snapshot = handle.snapshot
-		journal = self._store.load_journal(run_id)
-		context = WorkflowContext(inputs)
-		config = definition.config
-		deadline = time.time() + config.run_timeout
-
-		# Restore context from journal (for resume)
-		for entry in journal.values():
-			context.set(entry.label, entry.result)
 
 		try:
+			journal = self._store.load_journal(run_id)
+			context = WorkflowContext(inputs)
+			config = definition.config
+			deadline = time.time() + config.run_timeout
 			with handle.state_lock:
 				self._raise_if_cancelled(handle)
 				snapshot.status = RunStatus.RUNNING.value
@@ -548,7 +645,7 @@ class WorkflowRuntime:
 			# Async delivery to leader
 			self._deliver_completion(run_id, definition.name, snapshot)
 
-		except Exception as exc:
+		except Exception as exc:  # noqa: BLE001 -- worker lifecycle boundary
 			cancelled = (
 				isinstance(exc, WorkflowCancelled)
 				or handle.cancelled.is_set()
@@ -574,7 +671,8 @@ class WorkflowRuntime:
 				)
 
 		finally:
-			self._store.release_run_lock(run_id)
+			if handle.run_lock is not None:
+				handle.run_lock.release()
 
 	# ── Internal: Step Dispatch ───────────────────────────────
 
@@ -604,7 +702,7 @@ class WorkflowRuntime:
 			)
 		elif isinstance(step, ToolStep):
 			result = self._execute_tool_step(
-				step, context, snapshot, phase_name, run_id
+				step, context, snapshot, phase_name, run_id, journal=journal
 			)
 		elif isinstance(step, ParallelStep):
 			result = self._execute_parallel_step(
@@ -618,7 +716,8 @@ class WorkflowRuntime:
 			)
 		elif isinstance(step, WorkflowStep):
 			result = self._execute_workflow_step(
-				step, context, snapshot, config, phase_name, run_id, depth, deadline
+				step, context, snapshot, config, phase_name, run_id, depth, deadline,
+				journal=journal
 			)
 		else:
 			raise WorkflowError(f"Unknown step type: {type(step).__name__}")
@@ -638,13 +737,58 @@ class WorkflowRuntime:
 		run_id: str,
 		deadline: float,
 		item_id: str = "",
+		legacy_item_id: str | None = None,
+	) -> Any:
+		"""Serialize identical Agent journal misses within one live run."""
+		handle = self._get_handle(run_id)
+		if handle is None or handle.snapshot is not snapshot:
+			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
+		prompt = context.render(step.prompt_template)
+		schema_json = canonical_json(step.output_schema) if step.output_schema else ""
+		key = compute_stable_key("agent", step.label, prompt, schema_json, item_id)
+		legacy_schema_json = (
+			json.dumps(step.output_schema, sort_keys=True)
+			if step.output_schema else ""
+		)
+		legacy_item_identity = item_id if legacy_item_id is None else legacy_item_id
+		legacy_key = compute_legacy_stable_key(
+			"agent", step.label, prompt, legacy_schema_json, legacy_item_identity
+		)
+
+		cached = self._claim_journal_key(
+			handle, journal, key, fallback_keys=(legacy_key,)
+		)
+		if cached is not None:
+			self._bus.emit(step_resumed(run_id, phase_name, step.label))
+			print(f"\033[36m[workflow]     ↺ {step.label} (cached)\033[0m")
+			return cached.result
+
+		try:
+			return self._execute_agent_step_attempt(
+				step, context, snapshot, journal, config, phase_name, run_id, deadline,
+				item_id=item_id,
+			)
+		finally:
+			self._release_journal_claim(handle, key)
+
+	def _execute_agent_step_attempt(
+		self,
+		step: AgentStep,
+		context: WorkflowContext,
+		snapshot: RunSnapshot,
+		journal: dict[str, JournalEntry],
+		config: WorkflowConfig,
+		phase_name: str,
+		run_id: str,
+		deadline: float,
+		item_id: str = "",
 	) -> Any:
 		"""Execute one agent step: check journal → budget → run agent → validate."""
 		handle = self._get_handle(run_id)
 		if handle is None or handle.snapshot is not snapshot:
 			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
 		prompt = context.render(step.prompt_template)
-		schema_json = json.dumps(step.output_schema, sort_keys=True) if step.output_schema else ""
+		schema_json = canonical_json(step.output_schema) if step.output_schema else ""
 		key = compute_stable_key("agent", step.label, prompt, schema_json, item_id)
 
 		# Journal lookup and budget guards share the same run-state boundary.
@@ -795,7 +939,65 @@ class WorkflowRuntime:
 		snapshot: RunSnapshot,
 		phase_name: str,
 		run_id: str,
+		journal: dict[str, JournalEntry] | None = None,
+		item_id: str = "",
 	) -> Any:
+		"""Reuse or journal one successfully executed logical tool call."""
+		args = context.render_args(step.args_template)
+		try:
+			canonical_args = canonical_json(args)
+		except (TypeError, ValueError) as exc:
+			raise WorkflowError(
+				f"ToolStep '{step.label}' resolved args must be JSON-compatible"
+			) from exc
+
+		handle = self._get_handle(run_id)
+		if journal is None:
+			result, _executed = self._execute_tool_step_attempt(
+				step, context, snapshot, phase_name, run_id
+			)
+			return result
+		if handle is None or handle.snapshot is not snapshot:
+			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
+
+		key = compute_stable_key(
+			"tool",
+			step.label,
+			canonical_args,
+			step.tool_name,
+			item_id,
+		)
+		cached = self._claim_journal_key(handle, journal, key)
+		if cached is not None:
+			self._bus.emit(step_resumed(run_id, phase_name, step.label))
+			print(f"\033[36m[workflow]     ↺ {step.label} (cached)\033[0m")
+			return cached.result
+
+		try:
+			result, executed = self._execute_tool_step_attempt(
+				step, context, snapshot, phase_name, run_id
+			)
+			if executed:
+				entry = JournalEntry(
+					stable_key=key,
+					label=step.label,
+					phase=phase_name,
+					step_kind="tool",
+					result=result,
+				)
+				self._publish_journal_entry(handle, run_id, journal, entry)
+			return result
+		finally:
+			self._release_journal_claim(handle, key)
+
+	def _execute_tool_step_attempt(
+		self,
+		step: ToolStep,
+		context: WorkflowContext,
+		snapshot: RunSnapshot,
+		phase_name: str,
+		run_id: str,
+	) -> tuple[Any, bool]:
 		"""Execute a deterministic tool call (no LLM)."""
 		self._bus.emit(step_started(run_id, phase_name, step.label))
 
@@ -810,7 +1012,7 @@ class WorkflowRuntime:
 				self._bus.emit(step_completed(run_id, phase_name, step.label, {
 					"error": error_msg, "allowed_failure": True
 				}))
-				return {"error": error_msg, "exit_code": -1}
+				return {"error": error_msg, "exit_code": -1}, False
 			raise WorkflowError(f"ToolStep '{step.label}': {error_msg}")
 
 		start_time = time.time()
@@ -833,7 +1035,7 @@ class WorkflowRuntime:
 					f"\033[33m[workflow]     ⚠ {step.label} failed (allowed): "
 					f"{exc}\033[0m"
 				)
-				return {"output": result, "error": str(exc), "exit_code": -1}
+				return {"output": result, "error": str(exc), "exit_code": -1}, False
 			raise WorkflowError(
 				f"ToolStep '{step.label}' failed: {exc}"
 			) from exc
@@ -847,11 +1049,11 @@ class WorkflowRuntime:
 					"error": execution.output,
 					"allowed_failure": True,
 				}))
-				return {
+				return ({
 					"output": execution.output,
 					"error": execution.output,
 					"exit_code": -1,
-				}
+				}, False)
 			raise WorkflowError(error_msg)
 
 		result = execution.output
@@ -864,7 +1066,7 @@ class WorkflowRuntime:
 
 		# Try to parse structured output from tool result
 		parsed = self._try_parse_tool_result(result)
-		return parsed
+		return parsed, True
 
 	# ── ParallelStep Execution ────────────────────────────────
 
@@ -895,7 +1097,7 @@ class WorkflowRuntime:
 					)
 				elif isinstance(branch, ToolStep):
 					r = self._execute_tool_step(
-						branch, context, snapshot, phase_name, run_id
+						branch, context, snapshot, phase_name, run_id, journal=journal
 					)
 				else:
 					r = None
@@ -971,6 +1173,13 @@ class WorkflowRuntime:
 				else:
 					item_id = str(idx)
 
+				journal_business_id = item_id
+				if isinstance(item, dict):
+					for identity_key in ("case_id", "id", "group_id"):
+						if identity_key in item and item[identity_key] is not None:
+							journal_business_id = str(item[identity_key])
+							break
+				journal_item_id = f"{idx}:{journal_business_id}"
 				item_results: dict[str, Any] = {"item_id": item_id, "item": item}
 				for stage in step.stages:
 					if time.time() > deadline:
@@ -980,11 +1189,13 @@ class WorkflowRuntime:
 					if isinstance(stage, AgentStep):
 						result = self._execute_agent_step(
 							stage, item_context, snapshot, journal, config,
-							phase_name, run_id, deadline, item_id=item_id
+							phase_name, run_id, deadline, item_id=journal_item_id,
+							legacy_item_id=item_id,
 						)
 					elif isinstance(stage, ToolStep):
 						result = self._execute_tool_step(
-							stage, item_context, snapshot, phase_name, run_id
+							stage, item_context, snapshot, phase_name, run_id,
+							journal=journal, item_id=journal_item_id
 						)
 					else:
 						result = None
@@ -1017,6 +1228,75 @@ class WorkflowRuntime:
 	# ── WorkflowStep (Nested) Execution ───────────────────────
 
 	def _execute_workflow_step(
+		self,
+		step: WorkflowStep,
+		context: WorkflowContext,
+		snapshot: RunSnapshot,
+		config: WorkflowConfig,
+		phase_name: str,
+		run_id: str,
+		depth: int,
+		deadline: float,
+		journal: dict[str, JournalEntry] | None = None,
+		item_id: str = "",
+	) -> Any:
+		"""Reuse or journal one successfully completed nested workflow."""
+		nested_inputs: dict[str, Any] = {}
+		for key, template in step.inputs_mapping.items():
+			if isinstance(template, str):
+				rendered = context.render(template)
+				try:
+					nested_inputs[key] = json.loads(rendered)
+				except (json.JSONDecodeError, TypeError):
+					nested_inputs[key] = rendered
+			else:
+				nested_inputs[key] = template
+
+		try:
+			canonical_inputs = canonical_json(nested_inputs)
+		except (TypeError, ValueError) as exc:
+			raise WorkflowError(
+				f"WorkflowStep '{step.label}' inputs must be JSON-compatible"
+			) from exc
+
+		handle = self._get_handle(run_id)
+		if journal is None:
+			return self._execute_workflow_step_attempt(
+				step, context, snapshot, config, phase_name, run_id, depth, deadline
+			)
+		if handle is None or handle.snapshot is not snapshot:
+			raise WorkflowError(f"Run '{run_id}' has no matching live handle")
+
+		key = compute_stable_key(
+			"workflow",
+			step.label,
+			canonical_inputs,
+			step.workflow_name,
+			item_id,
+		)
+		cached = self._claim_journal_key(handle, journal, key)
+		if cached is not None:
+			self._bus.emit(step_resumed(run_id, phase_name, step.label))
+			print(f"\033[36m[workflow]     ↺ {step.label} (cached)\033[0m")
+			return cached.result
+
+		try:
+			output = self._execute_workflow_step_attempt(
+				step, context, snapshot, config, phase_name, run_id, depth, deadline
+			)
+			entry = JournalEntry(
+				stable_key=key,
+				label=step.label,
+				phase=phase_name,
+				step_kind="workflow",
+				result=output,
+			)
+			self._publish_journal_entry(handle, run_id, journal, entry)
+			return output
+		finally:
+			self._release_journal_claim(handle, key)
+
+	def _execute_workflow_step_attempt(
 		self,
 		step: WorkflowStep,
 		context: WorkflowContext,

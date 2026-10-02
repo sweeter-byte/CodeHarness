@@ -12,6 +12,7 @@ and TranscriptStore (JSONL append).
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -77,6 +78,32 @@ class JournalEntry:
 # ── Stable Key ────────────────────────────────────────────────
 
 
+def canonical_json(value: Any) -> str:
+	"""Serialize a JSON-compatible value deterministically for step identity.
+
+	Non-JSON-compatible values intentionally raise TypeError or ValueError rather than
+	falling back to an unstable process-specific representation.
+	"""
+	def _validate_object_keys(item: Any) -> None:
+		if isinstance(item, dict):
+			for key, child in item.items():
+				if not isinstance(key, str):
+					raise TypeError("JSON object keys must be strings")
+				_validate_object_keys(child)
+		elif isinstance(item, (list, tuple)):
+			for child in item:
+				_validate_object_keys(child)
+
+	_validate_object_keys(value)
+	return json.dumps(
+		value,
+		sort_keys=True,
+		separators=(",", ":"),
+		ensure_ascii=False,
+		allow_nan=False,
+	)
+
+
 def compute_stable_key(
 	step_kind: str,
 	label: str,
@@ -89,8 +116,57 @@ def compute_stable_key(
 	The same semantic call (same kind + label + prompt + schema + item)
 	produces the same key across runs, enabling Resume to skip completed work.
 	"""
+	raw = canonical_json([
+		step_kind, label, item_id, resolved_prompt, schema_json,
+	])
+	return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def compute_legacy_stable_key(
+	step_kind: str,
+	label: str,
+	resolved_prompt: str,
+	schema_json: str = "",
+	item_id: str = "",
+) -> str:
+	"""Reproduce the pre-framing key for persisted Agent journal lookup."""
 	raw = f"{step_kind}|{label}|{item_id}|{resolved_prompt}|{schema_json}"
 	return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ── Run Lock ─────────────────────────────────────────────────
+
+
+class WorkflowRunLock:
+	"""Ownership token for one process-held Workflow run lock.
+
+	The open file description is the ownership identity. The on-disk file is
+	only a stable carrier for ``flock`` and is deliberately never unlinked.
+	"""
+
+	def __init__(self, run_id: str, lock_file: Any):
+		self.run_id = run_id
+		self._lock_file = lock_file
+		self._released = False
+		self._release_lock = threading.Lock()
+
+	@property
+	def released(self) -> bool:
+		with self._release_lock:
+			return self._released
+
+	def release(self) -> None:
+		"""Release this token's fd exactly once."""
+		with self._release_lock:
+			if self._released:
+				return
+			try:
+				fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+			finally:
+				try:
+					self._lock_file.close()
+				finally:
+					self._released = True
 
 
 # ── State Store ───────────────────────────────────────────────
@@ -250,36 +326,31 @@ class WorkflowStateStore:
 		except (json.JSONDecodeError, TypeError):
 			return None
 
-	# ── Run Lock (file-based, cross-process) ──
+	# ── Run Lock (POSIX flock, cross-process) ──
 
-	def acquire_run_lock(self, run_id: str, timeout: int = 3600) -> bool:
-		"""Exclusive-create a lock file. Returns True if acquired."""
+	def acquire_run_lock(self, run_id: str) -> WorkflowRunLock | None:
+		"""Return an ownership token, or ``None`` while another owner holds it."""
 		run_dir = self._ensure_run_dir(run_id)
 		lock_path = run_dir / ".lock"
+		lock_file = open(lock_path, "a+b")  # noqa: SIM115 -- token owns fd
 		try:
-			# O_CREAT | O_EXCL: fails if file already exists
-			fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-			os.write(fd, json.dumps({
+			fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+		except BlockingIOError:
+			lock_file.close()
+			return None
+		run_lock = WorkflowRunLock(run_id, lock_file)
+
+		# Diagnostic metadata is advisory only. Mutual exclusion is provided by
+		# the held fd, never by this content or by deleting the carrier file.
+		try:
+			lock_file.seek(0)
+			lock_file.truncate()
+			lock_file.write(json.dumps({
 				"pid": os.getpid(),
 				"acquired_at": time.time(),
-				"timeout": timeout,
 			}).encode())
-			os.close(fd)
-			return True
-		except FileExistsError:
-			# Check if the lock is stale (exceeded timeout)
-			try:
-				data = json.loads(lock_path.read_text(encoding="utf-8"))
-				acquired_at = data.get("acquired_at", 0)
-				lock_timeout = data.get("timeout", timeout)
-				if time.time() - acquired_at > lock_timeout:
-					# Stale lock — remove and retry once
-					lock_path.unlink(missing_ok=True)
-					return self.acquire_run_lock(run_id, timeout)
-			except (json.JSONDecodeError, OSError):
-				pass
-			return False
-
-	def release_run_lock(self, run_id: str) -> None:
-		lock_path = self._run_dir(run_id) / ".lock"
-		lock_path.unlink(missing_ok=True)
+			lock_file.flush()
+		except Exception:
+			run_lock.release()
+			raise
+		return run_lock
