@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from dotenv import load_dotenv
+
 from evals.metrics.aggregate import aggregate_results
 from evals.runner.case import EvalCase, discover_cases
 from evals.runner.verifier import capture_patch, run_verifier
@@ -25,6 +27,41 @@ from evals.runner.workspace import WorkspaceManager
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = REPOSITORY_ROOT / "eval_results"
 TERMINATE_GRACE_SECONDS = 1.0
+
+REQUIRED_MODEL_ENVIRONMENT = (
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL_ID",
+)
+
+
+class EvaluationConfigurationError(RuntimeError):
+    """Raised before an evaluation run when model configuration is missing."""
+
+
+def load_evaluation_environment() -> dict[str, str]:
+    """Load the fixed repository .env without replacing exported values."""
+    load_dotenv(REPOSITORY_ROOT / ".env", override=False)
+    return dict(os.environ)
+
+
+def _validate_evaluation_environment(
+    environment: Mapping[str, str],
+    repository_root: Path = REPOSITORY_ROOT,
+) -> None:
+    missing = [
+        name for name in REQUIRED_MODEL_ENVIRONMENT if not environment.get(name)
+    ]
+    if not missing:
+        return
+    missing_lines = "\n".join(f"  {name}" for name in missing)
+    raise EvaluationConfigurationError(
+        "Missing evaluation model configuration:\n"
+        f"{missing_lines}\n\n"
+        "Configure it in:\n"
+        f"  {repository_root / '.env'}\n\n"
+        "or export it in the shell."
+    )
 
 
 @dataclass(frozen=True)
@@ -333,7 +370,12 @@ def run_evaluation(
     results_root: str | Path = RESULTS_ROOT,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    env = dict(os.environ if environment is None else environment)
+    env = (
+        load_evaluation_environment()
+        if environment is None
+        else dict(environment)
+    )
+    _validate_evaluation_environment(env)
     cases = discover_cases(
         REPOSITORY_ROOT / "evals" / "cases" / suite,
         case_id=case_id,
@@ -377,7 +419,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    run_evaluation(suite=args.suite, case_id=args.case)
+    try:
+        run_evaluation(suite=args.suite, case_id=args.case)
+    except EvaluationConfigurationError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     return 0
 
 

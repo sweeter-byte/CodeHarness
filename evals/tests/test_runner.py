@@ -5,11 +5,15 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
+import evals.runner.runner as runner_module
 from evals.runner.case import EvalCase, Verification
 from evals.runner.runner import (
     _worker_environment,
     build_run_config,
     run_case,
+    run_evaluation,
     write_json,
 )
 from evals.runner.workspace import WorkspaceManager
@@ -38,7 +42,7 @@ def _case(tmp_path, verifier=None, timeout=3):
                     sys.executable,
                     "-c",
                     "from pathlib import Path; "
-                    "assert Path('value.txt').read_text() == 'fixed\\n'",
+        "assert Path('value.txt').read_text() == 'fixed\\n'; "
                 ]
             )
         ),
@@ -61,6 +65,7 @@ def _successful_worker(secret):
         "import json, sys; "
         "from pathlib import Path; "
         "Path('value.txt').write_text('fixed\\n'); "
+        "Path('secret.txt').write_text('" + secret + "'); "
         "Path(sys.argv[1]).write_text(json.dumps({"
         "'final_answer': '" + secret + " says all tests passed',"
         "'session_stats': {'prompt_tokens': 2, 'completion_tokens': 3,"
@@ -82,8 +87,16 @@ def test_run_case_uses_independent_verifier_and_persists_redacted_artifacts(
     secret = "eval-secret-value"
     run_id = "run-success"
     result_root = tmp_path / "results" / run_id
+    verifier_code = (
+        "import sys; "
+        "from pathlib import Path; "
+        "assert Path('value.txt').read_text() == 'fixed\\n'; "
+        f"print('{secret} verifier stdout'); "
+        f"print('{secret} verifier stderr', file=sys.stderr)"
+    )
+    case = _case(tmp_path, verifier=[sys.executable, "-c", verifier_code])
     result = run_case(
-        _case(tmp_path),
+        case,
         run_id=run_id,
         workspace_manager=_manager(tmp_path, run_id),
         result_root=result_root,
@@ -106,6 +119,7 @@ def test_run_case_uses_independent_verifier_and_persists_redacted_artifacts(
         "agent.stderr.log",
         "verifier.stdout.log",
         "verifier.stderr.log",
+        "patch.diff",
     ):
         assert secret not in (case_dir / name).read_text()
     assert "***REDACTED***" in (case_dir / "agent.stdout.log").read_text()
@@ -198,6 +212,125 @@ def test_run_config_never_contains_api_key(tmp_path):
     assert config["case_ids"] == ["a", "b"]
 
 
+def test_summary_json_redacts_api_key(tmp_path):
+    secret = "summary-secret-value"
+    path = tmp_path / "summary.json"
+
+    write_json(
+        path,
+        {"failure_details": [{"error": f"provider rejected {secret}"}]},
+        {"DEEPSEEK_API_KEY": secret},
+    )
+
+    raw = path.read_text(encoding="utf-8")
+    assert secret not in raw
+    assert "***REDACTED***" in raw
+
+
+def test_load_evaluation_environment_reads_only_repository_dotenv(
+    tmp_path, monkeypatch
+):
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    monkeypatch.setattr(runner_module, "REPOSITORY_ROOT", repository_root)
+    (repository_root / ".env").write_text(
+        "DEEPSEEK_API_KEY=repository-key\n"
+        "DEEPSEEK_BASE_URL=https://repository.example/v1\n"
+        "DEEPSEEK_MODEL_ID=repository-model\n",
+        encoding="utf-8",
+    )
+    other_directory = tmp_path / "other"
+    other_directory.mkdir()
+    (other_directory / ".env").write_text(
+        "DEEPSEEK_API_KEY=cwd-key\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "DEEPSEEK_MODEL_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(other_directory)
+
+    environment = runner_module.load_evaluation_environment()
+
+    assert environment["DEEPSEEK_API_KEY"] == "repository-key"
+    assert environment["DEEPSEEK_BASE_URL"] == "https://repository.example/v1"
+    assert environment["DEEPSEEK_MODEL_ID"] == "repository-model"
+
+
+def test_load_evaluation_environment_preserves_exported_values(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(runner_module, "REPOSITORY_ROOT", tmp_path)
+    (tmp_path / ".env").write_text(
+        "DEEPSEEK_API_KEY=repository-key\n"
+        "DEEPSEEK_BASE_URL=https://repository.example/v1\n"
+        "DEEPSEEK_MODEL_ID=repository-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "shell-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://shell.example/v1")
+    monkeypatch.setenv("DEEPSEEK_MODEL_ID", "shell-model")
+
+    environment = runner_module.load_evaluation_environment()
+
+    assert environment["DEEPSEEK_API_KEY"] == "shell-key"
+    assert environment["DEEPSEEK_BASE_URL"] == "https://shell.example/v1"
+    assert environment["DEEPSEEK_MODEL_ID"] == "shell-model"
+
+
+def test_run_evaluation_fails_before_creating_run_artifacts(
+    tmp_path, monkeypatch
+):
+    results_root = tmp_path / "eval-results"
+    run_id_created = False
+
+    def unexpected_make_run_id():
+        nonlocal run_id_created
+        run_id_created = True
+        return "unexpected"
+
+    monkeypatch.setattr(runner_module, "make_run_id", unexpected_make_run_id)
+
+    with pytest.raises(
+        runner_module.EvaluationConfigurationError,
+        match=(
+            r"Missing evaluation model configuration:\n"
+            r"  DEEPSEEK_API_KEY\n"
+            r"  DEEPSEEK_MODEL_ID\n\n"
+            r"Configure it in:\n"
+        ),
+    ):
+        run_evaluation(
+            suite="smoke",
+            results_root=results_root,
+            environment={"DEEPSEEK_BASE_URL": "https://models.example/v1"},
+        )
+
+    assert run_id_created is False
+    assert not results_root.exists()
+
+
+def test_main_reports_missing_configuration_without_traceback(
+    monkeypatch, capsys
+):
+    error = runner_module.EvaluationConfigurationError("missing config")
+
+    def fail_evaluation(**kwargs):
+        raise error
+
+    monkeypatch.setattr(runner_module, "run_evaluation", fail_evaluation)
+
+    exit_code = runner_module.main(["--suite", "smoke"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err == "missing config\n"
+
+
 def test_importing_parent_runner_does_not_import_codeharness_runtime():
     code = (
         "import sys; import evals.runner.runner; "
@@ -224,10 +357,16 @@ def test_worker_environment_forces_empty_case_local_mcp_config(tmp_path):
     child_env = _worker_environment(
         workspace,
         agent_home,
-        {"MCP_CONFIG_PATH": str(host_mcp_config)},
+        {
+            "WORKSPACE": str(tmp_path / "dotenv-workspace"),
+            "CODEHARNESS_HOME": str(tmp_path / "dotenv-agent-home"),
+            "MCP_CONFIG_PATH": str(host_mcp_config),
+        },
     )
 
     case_mcp_config = agent_home / "mcp/servers.json"
+    assert child_env["WORKSPACE"] == str(workspace)
+    assert child_env["CODEHARNESS_HOME"] == str(agent_home)
     assert child_env["MCP_CONFIG_PATH"] == str(case_mcp_config)
     assert case_mcp_config.read_text(encoding="utf-8") == "{}\n"
     assert not host_mcp_config.exists()

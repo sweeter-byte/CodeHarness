@@ -32,6 +32,7 @@ class SuccessfulAdapter:
         assert case.case_id == "sample"
         assert workspace.name == "workspace"
         assert agent_home.name == "agent-home"
+        assert self.environment["DEEPSEEK_API_KEY"] == "parent-key"
         return AdapterResult(
             final_answer="done",
             session_stats={
@@ -54,9 +55,18 @@ class FailingAdapter:
 def test_worker_writes_completed_result_without_llm(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / ".env").write_text(
+        "DEEPSEEK_API_KEY=workspace-key\n",
+        encoding="utf-8",
+    )
     agent_home = tmp_path / "agent-home"
     result_path = tmp_path / "worker.json"
-    environment = {"CODEHARNESS_HOME": str(agent_home)}
+    environment = {
+        "CODEHARNESS_HOME": str(agent_home),
+        "DEEPSEEK_API_KEY": "parent-key",
+        "DEEPSEEK_BASE_URL": "https://models.example/v1",
+        "DEEPSEEK_MODEL_ID": "parent-model",
+    }
 
     exit_code = run_worker(
         _case_file(tmp_path),
