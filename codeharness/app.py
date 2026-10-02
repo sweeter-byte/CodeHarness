@@ -13,8 +13,16 @@ from codeharness.subagent import (
     TASK_TOOL,
     configure_agent_factory as configure_subagent_agent_factory,
 )
-from codeharness.tasks import TASK_HANDLERS as TASK_SYS_HANDLERS, TASK_TOOLS
+from codeharness.context import ARTIFACT_STORE, TRANSCRIPT_STORE
+from codeharness.paths import RuntimePaths
+from codeharness.tasks import (
+    TASKS,
+    TASK_HANDLERS as TASK_SYS_HANDLERS,
+    TASK_TOOLS,
+)
 from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
+from codeharness.team.bus import BUS
+from codeharness.team.worktree import configure_worktrees
 from codeharness.team import wakeup as team_wakeup
 from codeharness.workflow import (
     WORKFLOW_TOOLS,
@@ -47,6 +55,10 @@ class CodeHarness:
 
     def __init__(self, config: RuntimeConfig):
         self.config = config
+        self.paths = RuntimePaths.build(
+            workspace=config.workspace,
+            agent_home=config.agent_home,
+        )
         self.client = None
         self.registry = None
         self.mcp_manager = None
@@ -56,7 +68,7 @@ class CodeHarness:
         self.workflow_registry = WorkflowRegistry()
         register_builtin_workflows(self.workflow_registry)
         self.workflow_state_store = WorkflowStateStore(
-            self.config.workspace / ".codeharness" / "workflows"
+            self.paths.workflow_runs_dir
         )
         self.workflow_event_bus = WorkflowEventBus()
         self.workflow_runtime = WorkflowRuntime(
@@ -112,7 +124,8 @@ class CodeHarness:
             "client": self.client,
             "model": self.config.model,
             "model_context_window": self.config.model_context_window,
-            "workspace": str(self.config.workspace),
+            "workspace": str(self.paths.workspace),
+            "memory_dir": self.paths.project_memory_dir,
             "approval_handler": self.approval_handler,
             "status_handler": self.status_handler,
             "session_stats": self.session_stats,
@@ -131,16 +144,22 @@ class CodeHarness:
         if self._started:
             return self
 
+        TASKS.set_directory(self.paths.tasks_dir)
+        BUS.configure(self.paths.mailboxes_dir)
+        configure_worktrees(self.paths.workspace, self.paths.worktrees_dir)
+        ARTIFACT_STORE.configure(self.paths.artifacts_dir)
+        TRANSCRIPT_STORE.configure(self.paths.transcripts_dir)
+
         self.client = OpenAI(
             api_key=self.config.api_key,
             base_url=self.config.base_url,
         )
         # Root native-tool permissions at the configured workspace, not at
         # the import-time cwd. Dependency direction stays Runtime → Permission.
-        hooks.configure_permissions([str(self.config.workspace)])
+        hooks.configure_permissions([str(self.paths.workspace)])
         configure_subagent_agent_factory(
             self.create_agent,
-            workspace=str(self.config.workspace),
+            workspace=str(self.paths.workspace),
         )
         TEAM.set_agent_factory(self.create_agent)
 
@@ -151,7 +170,7 @@ class CodeHarness:
         registry = build_base_registry(
             todo_manager=self.todo_manager,
             background_manager=self.background_manager,
-            workspace=str(self.config.workspace),
+            workspace=str(self.paths.workspace),
         )
         registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
@@ -209,6 +228,7 @@ class CodeHarness:
         self._cron_started = True
         cron.start(
             delivery_handler=self._try_deliver_async,
+            store_path=self.paths.scheduler_jobs_file,
             status_handler=self._emit_status,
         )
         self._team_wakeup_started = True

@@ -2,8 +2,6 @@ import json
 import uuid
 from pathlib import Path
 
-_DEFAULT_DIR = Path(".codeharness/transcripts")
-
 
 class TranscriptStore:
     """Archive pruned conversation history to disk (JSONL, one message per line).
@@ -12,12 +10,24 @@ class TranscriptStore:
     from the active context, so they remain recoverable.
     """
 
-    def __init__(self, base_dir: Path = _DEFAULT_DIR):
-        self.base_dir = base_dir
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, base_dir: Path | None = None):
+        self._base_dir = Path(base_dir) if base_dir is not None else None
+
+    @property
+    def base_dir(self) -> Path:
+        if self._base_dir is None:
+            raise RuntimeError(
+                "transcript store is not configured; start CodeHarness first"
+            )
+        return self._base_dir
+
+    def configure(self, base_dir: Path) -> None:
+        """Point this store at an explicit runtime-owned directory."""
+        self._base_dir = Path(base_dir)
 
     def save(self, messages: list) -> str:
         """Persist a list of messages; return a transcript_id."""
+        self.base_dir.mkdir(parents=True, exist_ok=True)
         transcript_id = f"transcript-{uuid.uuid4().hex[:8]}"
         filepath = self.base_dir / f"{transcript_id}.jsonl"
         with open(filepath, "w", encoding="utf-8") as f:

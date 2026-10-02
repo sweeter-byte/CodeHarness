@@ -2,6 +2,7 @@ import json
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from openai import OpenAI
 from codeharness.tools import build_base_registry, TodoManager
 from codeharness import hooks
@@ -28,6 +29,7 @@ class Agent:
                  handlers: dict = None, max_rounds: int = None,
                  todo_manager: TodoManager = None,
                  memory_manager: MemoryManager = None,
+                 memory_dir: str | Path | None = None,
                  background_manager: BackgroundManager = None,
                  session_stats: dict = None,
                  session_stats_lock: threading.RLock = None,
@@ -55,12 +57,12 @@ class Agent:
 
         # ── Memory Management ──
         # memory_manager=False disables memory entirely (teammates): avoids
-        # concurrent .memory/ writes; the leader owns cross-session memory.
+        # concurrent memory writes; the leader owns cross-session memory.
         if memory_manager is False:
             self.memory_manager = None
         else:
             self.memory_manager = memory_manager if memory_manager is not None \
-                else MemoryManager(client=self.client, model=self.model)
+                else MemoryManager(memory_dir=memory_dir, client=self.client, model=self.model)
 
         # ── Interaction mode ──
         # interactive=False: permission 'ask' decisions are rejected without

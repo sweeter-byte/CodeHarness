@@ -40,6 +40,7 @@ def _config(workspace: Path) -> RuntimeConfig:
         model_context_window=4096,
         workspace=workspace,
         mcp_config_path=workspace / "mcp.json",
+        agent_home=workspace / "agent-home",
     )
 
 
@@ -145,8 +146,8 @@ def test_state_store_is_workspace_rooted_and_data_isolated(tmp_path):
     a = CodeHarness(_config(tmp_path / "a"))
     b = CodeHarness(_config(tmp_path / "b"))
 
-    assert a.workflow_state_store.base_dir == tmp_path / "a/.codeharness/workflows"
-    assert b.workflow_state_store.base_dir == tmp_path / "b/.codeharness/workflows"
+    assert a.workflow_state_store.base_dir == tmp_path / "a/.codeharness/runs/workflows"
+    assert b.workflow_state_store.base_dir == tmp_path / "b/.codeharness/runs/workflows"
 
     snapshot = RunSnapshot(run_id="run_a", workflow_name="only-a", inputs={})
     a.workflow_state_store.save_snapshot(snapshot)

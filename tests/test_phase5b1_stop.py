@@ -41,6 +41,9 @@ def cron_env(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cron, "STOP_JOIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        cron, "_test_store_path", tmp_path / "jobs.json", raising=False
+    )
     with cron._delivery_lock:
         cron._delivery_queue.clear()
     yield cron
@@ -68,7 +71,11 @@ def _start_cron_with_blocked_delivery(cron):
         gate.wait(timeout=WAIT_TIMEOUT)
         return True
 
-    cron.start(delivery_handler=blocking_handler, status_handler=lambda m: None)
+    cron.start(
+        delivery_handler=blocking_handler,
+        store_path=cron._test_store_path,
+        status_handler=lambda m: None,
+    )
     # Every-minute job so the scheduler enqueues it on the next poll.
     cron.get_store().add("* * * * *", "blocked delivery", recurring=True, durable=False)
     assert _wait_until(entered.is_set), "delivery handler was never reached"
@@ -105,7 +112,11 @@ def test_cron_start_refuses_while_previous_thread_alive(cron_env):
 
     # 3: no next generation while the old processor is still alive.
     with pytest.raises(RuntimeError, match="still stopping"):
-        cron.start(delivery_handler=lambda c: True, status_handler=None)
+        cron.start(
+            delivery_handler=lambda c: True,
+            store_path=cron._test_store_path,
+            status_handler=None,
+        )
 
     assert cron.RUNTIME_STOP.is_set()  # start() must not clear the stop signal
     assert cron._processor_thread is processor
@@ -133,7 +144,11 @@ def test_cron_second_stop_after_thread_exits_completes_cleanup(cron_env):
     assert cron.get_store() is None
 
     # 5: a fresh runtime starts normally after the cleanup.
-    cron.start(delivery_handler=lambda c: True, status_handler=lambda m: None)
+    cron.start(
+        delivery_handler=lambda c: True,
+        store_path=cron._test_store_path,
+        status_handler=lambda m: None,
+    )
     assert cron._scheduler_thread is not None
     assert cron._processor_thread is not None
     assert cron._scheduler_thread.is_alive()
@@ -156,7 +171,11 @@ def test_cron_start_cleans_stale_dead_thread_references(cron_env):
     cron._scheduler_thread = dead
     cron._processor_thread = dead
 
-    cron.start(delivery_handler=lambda c: True, status_handler=lambda m: None)
+    cron.start(
+        delivery_handler=lambda c: True,
+        store_path=cron._test_store_path,
+        status_handler=lambda m: None,
+    )
 
     assert cron._scheduler_thread is not dead
     assert cron._processor_thread is not dead
@@ -172,6 +191,10 @@ def test_cron_start_cleans_stale_dead_thread_references(cron_env):
 def wakeup_env(monkeypatch, tmp_path):
     """Isolated cwd (BUS mailbox dir) + short join timeout."""
     from codeharness.team import wakeup
+    from codeharness.team.bus import BUS
+
+    monkeypatch.setattr(BUS, "_mailbox_dir", BUS._mailbox_dir)
+    BUS.configure(tmp_path / ".codeharness/runtime/team/mailboxes")
 
     monkeypatch.chdir(tmp_path)
     # Join timeout must exceed the poll interval (wait_for_messages blocks for

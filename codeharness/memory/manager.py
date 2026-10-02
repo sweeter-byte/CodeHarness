@@ -1,7 +1,7 @@
 """MemoryManager — cross-session persistent knowledge.
 
 Four phases:
-  Store       — one memory per .memory/*.md file with YAML frontmatter
+  Store       — one Markdown file per memory with YAML frontmatter
   Recall      — LLM-based selection + keyword fallback, inject into system prompt
   Extract     — post-conversation LLM extraction of reusable information
   Consolidate — merge duplicates and expired entries when threshold is hit
@@ -13,8 +13,6 @@ from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────
 
-MEMORY_DIR = Path(".memory")
-MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
 MEMORY_MAX_RECALL = 5
 MEMORY_MAX_BODY_CHARS = 4000
 MEMORY_CONSOLIDATE_THRESHOLD = 10
@@ -41,9 +39,12 @@ class MemoryManager:
         write_memory_file(...)     — write a single memory and rebuild index
     """
 
-    def __init__(self, memory_dir: str | Path = ".memory",
+    def __init__(self, memory_dir: str | Path | None = None,
                  client=None, model: str = ""):
+        if memory_dir is None:
+            raise ValueError("memory_dir must be configured explicitly")
         self.memory_dir = Path(memory_dir)
+        self.index_path = self.memory_dir / "MEMORY.md"
         self.client = client
         self.model = model
         self.records: list[dict] = []
@@ -54,12 +55,12 @@ class MemoryManager:
     # ── Scan & Index ──────────────────────────────────────────
 
     def scan(self) -> None:
-        """Walk .memory/*.md, parse frontmatter, build in-memory index."""
+        """Walk the configured memory directory and build the in-memory index."""
         self.records.clear()
         if not self.memory_dir.exists():
             return
         for path in sorted(self.memory_dir.glob("*.md")):
-            if path.name == MEMORY_INDEX.name:
+            if path.name == self.index_path.name:
                 continue
             if not path.is_file():
                 continue
@@ -88,7 +89,7 @@ class MemoryManager:
             )
         if not self.records:
             lines.append("(no memories)")
-        MEMORY_INDEX.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # ── Recall: select then load ──────────────────────────────
 
@@ -289,7 +290,7 @@ class MemoryManager:
         """
         mem_files = [
             p for p in self.memory_dir.glob("*.md")
-            if p.name != MEMORY_INDEX.name
+            if p.name != self.index_path.name
         ]
         if len(mem_files) <= MEMORY_CONSOLIDATE_THRESHOLD:
             return 0
@@ -343,7 +344,7 @@ class MemoryManager:
 
         try:
             for p in self.memory_dir.glob("*.md"):
-                if p.name != MEMORY_INDEX.name:
+                if p.name != self.index_path.name:
                     p.unlink()
             for rec in consolidated:
                 path = self.memory_dir / f"{_slug(rec['name'])}.md"
@@ -358,7 +359,7 @@ class MemoryManager:
         except Exception:
             # Restore snapshot on failure
             for p in self.memory_dir.glob("*.md"):
-                if p.name != MEMORY_INDEX.name:
+                if p.name != self.index_path.name:
                     p.unlink()
             for filename, content in snapshot.items():
                 (self.memory_dir / filename).write_text(

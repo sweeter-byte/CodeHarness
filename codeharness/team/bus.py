@@ -1,6 +1,6 @@
 """MessageBus — file-backed inbox for agent-to-agent communication.
 
-Each agent owns one mailbox file .mailboxes/<name>.jsonl; 'lead' is the
+Each agent owns one JSONL mailbox in the configured runtime directory; 'lead' is the
 reserved leader mailbox. Lifecycle matches the team's. A Condition makes
 message arrival wake waiting teammates without polling at full speed.
 """
@@ -10,7 +10,6 @@ import threading
 import time
 from pathlib import Path
 
-MAILBOX_DIR = Path(".mailboxes")
 
 LEADER = "lead"  # reserved mailbox name; teammates must never use it
 
@@ -18,9 +17,24 @@ LEADER = "lead"  # reserved mailbox name; teammates must never use it
 class MessageBus:
 	"""Per-agent JSONL inboxes with condition-variable notification."""
 
-	def __init__(self, mailbox_dir: str | Path = MAILBOX_DIR):
-		self.mailbox_dir = Path(mailbox_dir)
+	def __init__(self, mailbox_dir: str | Path | None = None):
+		self._mailbox_dir = (
+			Path(mailbox_dir) if mailbox_dir is not None else None
+		)
 		self._cond = threading.Condition()
+
+	@property
+	def mailbox_dir(self) -> Path:
+		if self._mailbox_dir is None:
+			raise RuntimeError(
+				"message bus is not configured; start CodeHarness first"
+			)
+		return self._mailbox_dir
+
+	def configure(self, mailbox_dir: str | Path) -> None:
+		"""Point this bus at an explicit runtime-owned mailbox directory."""
+		with self._cond:
+			self._mailbox_dir = Path(mailbox_dir)
 
 	# ── internals ──
 

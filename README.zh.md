@@ -494,3 +494,4 @@ CodeHarness (app.py)
 
 启动Goal模式,当模型不再调用工具时,不立即结束循环,而是要经过Goal Gate判断.
 
+开发说明：旧开发版本产生的 legacy runtime files 不会自动迁移。

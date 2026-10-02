@@ -16,7 +16,6 @@ from pathlib import Path
 
 # ── Constants ──────────────────────────────────────────────────
 
-SCHEDULED_TASKS_FILE = Path(".scheduled_tasks.json")
 POLL_INTERVAL = 1.0       # Scheduler polls every 1 second
 QUEUE_POLL_INTERVAL = 0.2 # Queue processor checks every 200ms
 STOP_JOIN_TIMEOUT = 2.0   # Bound for joining scheduler/processor threads on stop
@@ -136,7 +135,7 @@ def cron_matches(cron: str, moment: datetime) -> bool:
 class CronStore:
 	"""File-backed store for durable cron jobs with atomic writes."""
 
-	def __init__(self, path: str | Path = SCHEDULED_TASKS_FILE):
+	def __init__(self, path: str | Path):
 		self.path = Path(path)
 		self.jobs: dict[str, CronJob] = {}
 
@@ -163,6 +162,7 @@ class CronStore:
 
 	def save(self) -> None:
 		"""Atomically write all durable jobs to disk."""
+		self.path.parent.mkdir(parents=True, exist_ok=True)
 		durable_jobs = [asdict(j) for j in self.jobs.values() if j.durable]
 		tmp_path = self.path.with_suffix(".tmp")
 		try:
@@ -322,6 +322,7 @@ _processor_thread: threading.Thread | None = None
 
 def start(
 	delivery_handler: Callable[[str], bool],
+	store_path: str | Path,
 	status_handler: Callable[[str], None] | None = None,
 ) -> None:
 	"""Initialize and start the cron scheduler threads.
@@ -342,7 +343,7 @@ def start(
 	_delivery_handler = delivery_handler
 	_status_handler = status_handler
 
-	_cron_store = CronStore()
+	_cron_store = CronStore(store_path)
 	_cron_store.load()
 
 	RUNTIME_STOP.clear()

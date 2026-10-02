@@ -79,6 +79,7 @@ def _started_runtime(monkeypatch, workspace):
         model_context_window=4096,
         workspace=workspace,
         mcp_config_path=workspace / "mcp.json",
+        agent_home=workspace / "agent-home",
     )
     harness = app_module.CodeHarness(config)
     harness.start()
@@ -353,7 +354,11 @@ def test_cron_stop_releases_threads_callbacks_and_store(monkeypatch, tmp_path):
     from codeharness.scheduler import cron
 
     monkeypatch.chdir(tmp_path)
-    cron.start(delivery_handler=lambda content: True, status_handler=lambda m: None)
+    cron.start(
+        delivery_handler=lambda content: True,
+        store_path=tmp_path / "jobs.json",
+        status_handler=lambda m: None,
+    )
     assert cron._scheduler_thread is not None
     assert cron._processor_thread is not None
     assert cron.get_store() is not None
@@ -424,6 +429,7 @@ def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
         model_context_window=4096,
         workspace=workspace,
         mcp_config_path=workspace / "mcp.json",
+        agent_home=workspace / "agent-home",
     )
     harness = app_module.CodeHarness(config)
 

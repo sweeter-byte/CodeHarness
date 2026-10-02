@@ -16,6 +16,7 @@ def _runtime(tmp_path):
         model_context_window=4096,
         workspace=Path(tmp_path),
         mcp_config_path=Path(tmp_path) / "mcp.json",
+        agent_home=Path(tmp_path) / "agent-home",
     )
     harness = CodeHarness(config)
     harness._started = True

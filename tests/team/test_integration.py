@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 # Repo root on sys.path (this script lives inside tests/team/)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -93,9 +94,14 @@ def wait_for(predicate, timeout=10.0, what="condition"):
 def main():
 	import codeharness.team  # noqa: F401  (registers everything)
 	from codeharness.team import TEAM, BUS, LEADER
-	TEAM.set_agent_factory(FakeAgent)
 	from codeharness.tasks import TASKS
+	from codeharness.team.worktree import configure_worktrees
 	from codeharness.team import tools as team_tools
+
+	TASKS.set_directory(Path(TMP) / ".codeharness/state/tasks")
+	BUS.configure(Path(TMP) / ".codeharness/runtime/team/mailboxes")
+	configure_worktrees(Path(TMP), Path(TMP) / ".codeharness/worktrees")
+	TEAM.set_agent_factory(FakeAgent)
 
 	# Buffer for inbox messages not matching the waited type yet.
 	pending: list[dict] = []

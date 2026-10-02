@@ -1,7 +1,7 @@
 """Workflow run state persistence — Snapshot (run-level) + Journal (step-level).
 
 Storage layout:
-    .codeharness/workflows/{run_id}/
+    .codeharness/runs/workflows/{run_id}/
     ├── snapshot.json       # Run-level state (atomic write)
     ├── journal.jsonl       # Step-level results (append-only)
     └── output.json         # Final output (atomic write)
@@ -181,7 +181,6 @@ class WorkflowStateStore:
 
 	def __init__(self, base_dir: Path):
 		self.base_dir = Path(base_dir)
-		self.base_dir.mkdir(parents=True, exist_ok=True)
 		self._locks: dict[str, threading.RLock] = {}
 		self._meta_lock = threading.Lock()
 
@@ -246,6 +245,7 @@ class WorkflowStateStore:
 
 	def update_index(self, snapshot: RunSnapshot) -> None:
 		"""Update the lightweight index with current snapshot state."""
+		self.base_dir.mkdir(parents=True, exist_ok=True)
 		index_path = self.base_dir / "index.json"
 		with self._meta_lock:
 			entries: list[dict] = []

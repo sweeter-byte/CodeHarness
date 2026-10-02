@@ -262,6 +262,7 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         model_context_window=123456,
         workspace=Path(tmp_path),
         mcp_config_path=Path(tmp_path) / "mcp.json",
+        agent_home=Path(tmp_path) / "agent-home",
     )
     harness = app_module.CodeHarness(config)
     harness.client = object()
@@ -276,6 +277,7 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         "model": "runtime-model",
         "model_context_window": 123456,
         "workspace": str(tmp_path),
+        "memory_dir": harness.paths.project_memory_dir,
         "approval_handler": None,
         "status_handler": None,
         "session_stats": harness.session_stats,
@@ -301,6 +303,7 @@ def test_runtime_agent_factory_respects_explicit_overrides(monkeypatch, tmp_path
         model_context_window=123456,
         workspace=Path(tmp_path),
         mcp_config_path=Path(tmp_path) / "mcp.json",
+        agent_home=Path(tmp_path) / "agent-home",
     )
     harness = app_module.CodeHarness(config)
     harness.client = object()

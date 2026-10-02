@@ -1,6 +1,6 @@
 """Task System — persistent, recoverable task graph for multi-agent collaboration.
 
-Each task is a JSON file in .tasks/{id}.json.
+Each task is one JSON file in the configured runtime directory.
 Dependencies form a DAG via blockedBy edges.
 Two-phase construction: create all nodes first, then add edges via update_task.
 
@@ -14,10 +14,6 @@ import secrets
 import threading
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-
-# ── Constants ──────────────────────────────────────────────────
-
-TASKS_DIR = Path(".tasks")
 
 AGENT_NAMES = [
 	"Alice", "Bob", "Carol", "Dave", "Eve", "Frank",
@@ -44,10 +40,23 @@ class Task:
 class TaskStore:
 	"""File-backed task store with DAG dependency validation."""
 
-	def __init__(self, tasks_dir: str | Path = TASKS_DIR):
-		self.tasks_dir = Path(tasks_dir)
+	def __init__(self, tasks_dir: str | Path | None = None):
+		self._tasks_dir = Path(tasks_dir) if tasks_dir is not None else None
 		# Single-process, multi-thread team: claim/release/save must be atomic.
 		self._lock = threading.RLock()
+
+	@property
+	def tasks_dir(self) -> Path:
+		if self._tasks_dir is None:
+			raise RuntimeError(
+				"task store is not configured; start CodeHarness first"
+			)
+		return self._tasks_dir
+
+	def set_directory(self, tasks_dir: str | Path) -> None:
+		"""Point this store at an explicit runtime-owned directory."""
+		with self._lock:
+			self._tasks_dir = Path(tasks_dir)
 
 	# ── ID generation ──
 
@@ -255,4 +264,4 @@ class TaskStore:
 			]
 
 
-TASKS = TaskStore(TASKS_DIR)
+TASKS = TaskStore()

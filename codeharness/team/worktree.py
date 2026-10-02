@@ -11,8 +11,18 @@ from pathlib import Path
 
 from codeharness.tasks import TASKS
 
-WORKTREES_DIR = Path(".worktrees")
 BRANCH_PREFIX = "wt/"
+_workspace_root: Path | None = None
+_worktrees_dir: Path | None = None
+
+
+def configure_worktrees(
+	workspace_root: str | Path, worktrees_dir: str | Path,
+) -> None:
+	"""Configure explicit roots for all worktree operations."""
+	global _workspace_root, _worktrees_dir
+	_workspace_root = Path(workspace_root).expanduser().resolve()
+	_worktrees_dir = Path(worktrees_dir).expanduser().resolve()
 
 
 def _git(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
@@ -41,7 +51,9 @@ def _validate_name(name: str) -> str | None:
 
 
 def worktree_path(name: str) -> Path:
-	return WORKTREES_DIR / name
+	if _worktrees_dir is None:
+		raise RuntimeError("worktree paths are not configured; start CodeHarness first")
+	return _worktrees_dir / name
 
 
 # ── Create ────────────────────────────────────────────────────
@@ -68,15 +80,24 @@ def create_worktree(name: str, task_id: str) -> tuple[str | None, str | None]:
 	if task.status != "pending" or task.owner is not None:
 		return None, f"Task {task_id} is {task.status} (owner={task.owner}); only pending unclaimed tasks can bind a worktree"
 
-	path = worktree_path(name)
+	try:
+		path = worktree_path(name)
+	except RuntimeError as exc:
+		return None, str(exc)
 	if path.exists():
 		return None, f"Worktree directory already exists: {path}"
 
-	code, out = _git(["worktree", "add", str(path), "-b", BRANCH_PREFIX + name])
+	code, out = _git(
+		["worktree", "add", str(path), "-b", BRANCH_PREFIX + name],
+		cwd=_workspace_root,
+	)
 	if code != 0:
 		# Partial operation check: git may leave a branch or registration.
 		partial = []
-		bc, _ = _git(["rev-parse", "--verify", f"refs/heads/{BRANCH_PREFIX}{name}"])
+		bc, _ = _git(
+			["rev-parse", "--verify", f"refs/heads/{BRANCH_PREFIX}{name}"],
+			cwd=_workspace_root,
+		)
 		if bc == 0:
 			partial.append(f"branch {BRANCH_PREFIX + name}")
 		if path.exists():
@@ -103,9 +124,10 @@ def resolve_worktree_cwd(task) -> tuple[str | None, str | None]:
 	state); unbound tasks resolve to the repository root. Refusing to claim
 	is safer than silently writing to some other directory.
 	"""
+	if _workspace_root is None or _worktrees_dir is None:
+		return None, "worktree paths are not configured; start CodeHarness first"
 	if task.worktree is None:
-		import os
-		return os.getcwd(), None
+		return str(_workspace_root), None
 	path = worktree_path(task.worktree)
 	if not path.exists():
 		return None, f"Bound worktree does not exist: {path}"
@@ -129,7 +151,10 @@ def remove_worktree(name: str, force: bool = False) -> tuple[bool, str]:
 	err = _validate_name(name)
 	if err:
 		return False, err
-	path = worktree_path(name)
+	try:
+		path = worktree_path(name)
+	except RuntimeError as exc:
+		return False, str(exc)
 	if not path.exists():
 		return False, f"Worktree does not exist: {path}"
 
@@ -155,7 +180,7 @@ def remove_worktree(name: str, force: bool = False) -> tuple[bool, str]:
 					   "force=true to discard them, or handle them manually")
 
 	remove_args = ["worktree", "remove", str(path)] + (["--force"] if force else [])
-	code, out = _git(remove_args)
+	code, out = _git(remove_args, cwd=_workspace_root)
 	if code != 0:
 		return False, f"git worktree remove failed: {out}"
 	return True, (f"Removed worktree '{name}' (branch {BRANCH_PREFIX + name} "

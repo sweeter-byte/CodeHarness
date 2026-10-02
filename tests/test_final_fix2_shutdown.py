@@ -22,6 +22,7 @@ def _runtime(tmp_path):
             model_context_window=4096,
             workspace=Path(tmp_path),
             mcp_config_path=Path(tmp_path) / "mcp.json",
+            agent_home=Path(tmp_path) / "agent-home",
         )
     )
     harness._started = True
@@ -254,6 +255,8 @@ def isolated_team(monkeypatch, tmp_path):
     from codeharness.team import protocol
     from codeharness.team.bus import BUS, LEADER
 
+    monkeypatch.setattr(BUS, "_mailbox_dir", BUS._mailbox_dir)
+    BUS.configure(tmp_path / ".codeharness" / "runtime" / "team" / "mailboxes")
     monkeypatch.chdir(tmp_path)
     protocol.clear()
     BUS.read_inbox(LEADER)
@@ -332,6 +335,8 @@ def test_idle_loop_prioritizes_shutdown_over_earlier_normal_message(
     from codeharness.team.bus import BUS, LEADER
     from codeharness.team.teammate import TeammateState, _idle_loop
 
+    monkeypatch.setattr(BUS, "_mailbox_dir", BUS._mailbox_dir)
+    BUS.configure(tmp_path / ".codeharness" / "runtime" / "team" / "mailboxes")
     monkeypatch.chdir(tmp_path)
     state = TeammateState(name="Carol", require_plan=False)
     BUS.send(LEADER, "Carol", "ordinary work", "message")
