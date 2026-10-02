@@ -38,3 +38,6 @@ examples/
 
 # Cron scheduler (persistent scheduled tasks)
 .scheduled_tasks.json
+
+# Evaluation output (run artifacts are local-only)
+eval_results/*

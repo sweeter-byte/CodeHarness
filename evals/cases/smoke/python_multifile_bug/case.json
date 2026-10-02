@@ -1,0 +1,8 @@
+{
+  "case_id": "python_multifile_bug",
+  "category": "bugfix",
+  "description": "Fix order totals across pricing and discount modules",
+  "task": "Fix the pricing and discount implementation so all tests pass.",
+  "timeout_seconds": 180,
+  "verification": {"command": ["python", "-m", "pytest", "-q"]}
+}

@@ -1,0 +1,8 @@
+{
+  "case_id": "python_implement_unique",
+  "category": "implementation",
+  "description": "Implement stable unique filtering",
+  "task": "Implement unique_preserving_order so all tests pass.",
+  "timeout_seconds": 180,
+  "verification": {"command": ["python", "-m", "pytest", "-q"]}
+}

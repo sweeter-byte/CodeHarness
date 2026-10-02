@@ -1,0 +1,8 @@
+{
+  "case_id": "python_fix_parser",
+  "category": "bugfix",
+  "description": "Fix comma-separated key/value parsing",
+  "task": "Fix parse_fields so all tests pass.",
+  "timeout_seconds": 180,
+  "verification": {"command": ["python", "-m", "pytest", "-q"]}
+}

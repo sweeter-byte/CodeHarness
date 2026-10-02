@@ -1,0 +1,8 @@
+{
+  "case_id": "python_add_validation",
+  "category": "validation",
+  "description": "Add user input validation",
+  "task": "Add the input validation required by the tests.",
+  "timeout_seconds": 180,
+  "verification": {"command": ["python", "-m", "pytest", "-q"]}
+}
