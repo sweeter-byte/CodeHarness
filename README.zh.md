@@ -390,8 +390,12 @@ Teammate 的上下文（messages）在内存中，崩溃即丢失，“复活”
 
 ## MCP Server
 
+实际 MCP 配置默认位于 `~/.codeharness/mcp/servers.json`，也可通过 `MCP_CONFIG_PATH` 覆盖。仓库中的 `mcp_servers.example.json` 仅作为示例：
 
-
+```bash
+mkdir -p ~/.codeharness/mcp
+cp mcp_servers.example.json ~/.codeharness/mcp/servers.json
+```
 
 ## Workflow Runtime
 

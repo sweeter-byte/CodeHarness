@@ -7,6 +7,7 @@ from pathlib import Path
 
 from evals.runner.case import EvalCase, Verification
 from evals.runner.runner import (
+    _worker_environment,
     build_run_config,
     run_case,
     write_json,
@@ -211,3 +212,22 @@ def test_importing_parent_runner_does_not_import_codeharness_runtime():
     )
 
     assert completed.stdout.strip() == "False"
+
+
+def test_worker_environment_forces_empty_case_local_mcp_config(tmp_path):
+    workspace = tmp_path / "workspace"
+    agent_home = tmp_path / "agent-home"
+    workspace.mkdir()
+    agent_home.mkdir()
+    host_mcp_config = tmp_path / "host-mcp.json"
+
+    child_env = _worker_environment(
+        workspace,
+        agent_home,
+        {"MCP_CONFIG_PATH": str(host_mcp_config)},
+    )
+
+    case_mcp_config = agent_home / "mcp/servers.json"
+    assert child_env["MCP_CONFIG_PATH"] == str(case_mcp_config)
+    assert case_mcp_config.read_text(encoding="utf-8") == "{}\n"
+    assert not host_mcp_config.exists()

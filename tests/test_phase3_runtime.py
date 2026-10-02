@@ -24,7 +24,7 @@ def test_runtime_config_reads_environment(monkeypatch, tmp_path):
     assert config.model == "test-model"
     assert config.model_context_window == 123456
     assert config.workspace == tmp_path
-    assert config.mcp_config_path.name == "mcp_servers.json"
+    assert config.mcp_config_path == config.agent_home / "mcp/servers.json"
 
 
 def test_default_prompt_preserves_workspace_skills_team_and_todo_rules():

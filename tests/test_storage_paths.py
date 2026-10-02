@@ -102,6 +102,42 @@ def test_runtime_config_reads_agent_home_default_and_override(monkeypatch, tmp_p
     assert configured.agent_home == override.resolve()
 
 
+def test_runtime_config_defaults_mcp_to_agent_home_without_creating_it(
+    monkeypatch, tmp_path
+):
+    import codeharness.config as config_module
+
+    monkeypatch.setattr(config_module, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("DEEPSEEK_MODEL_ID", "model")
+    monkeypatch.setenv("CODEHARNESS_HOME", str(tmp_path / "agent-home"))
+    monkeypatch.delenv("MCP_CONFIG_PATH", raising=False)
+
+    config = config_module.RuntimeConfig.from_env()
+
+    expected = (tmp_path / "agent-home/mcp/servers.json").resolve()
+    assert config.mcp_config_path == expected
+    assert not expected.exists()
+
+
+def test_runtime_config_prefers_explicit_mcp_config_path(monkeypatch, tmp_path):
+    import codeharness.config as config_module
+
+    monkeypatch.setattr(config_module, "load_dotenv", lambda **kwargs: None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("DEEPSEEK_MODEL_ID", "model")
+    monkeypatch.setenv("CODEHARNESS_HOME", str(tmp_path / "agent-home"))
+    explicit = tmp_path / "elsewhere/custom-mcp.json"
+    monkeypatch.setenv("MCP_CONFIG_PATH", str(explicit))
+
+    config = config_module.RuntimeConfig.from_env()
+
+    assert config.mcp_config_path == explicit.resolve()
+    assert not explicit.exists()
+
+
 def test_file_stores_create_only_their_configured_paths(tmp_path, monkeypatch):
     from codeharness.context.artifact_store import ArtifactStore
     from codeharness.context.transcript_store import TranscriptStore

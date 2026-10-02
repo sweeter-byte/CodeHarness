@@ -1,10 +1,14 @@
 """Unit tests for codeharness.mcp.config — loading, expansion, validation."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from codeharness.mcp.config import MCPConfigError, load_config, validate_config
+
+
+REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
 def _write(tmp_path, data) -> str:
@@ -129,3 +133,12 @@ def test_missing_file_and_bad_json(tmp_path):
     p.write_text("{not json")
     with pytest.raises(MCPConfigError, match="invalid JSON"):
         load_config(p)
+
+
+def test_repository_example_config_loads(monkeypatch):
+    monkeypatch.setenv("WORKSPACE", "/tmp/example-workspace")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "example-token")
+
+    configs = load_config(REPOSITORY_ROOT / "mcp_servers.example.json")
+
+    assert set(configs) == {"filesystem", "github"}

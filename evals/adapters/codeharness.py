@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from codeharness.app import CodeHarness
-from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW, PROJECT_ROOT, RuntimeConfig
+from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW, RuntimeConfig
 from evals.runner.case import EvalCase
 
 
@@ -36,9 +36,10 @@ class CodeHarnessAdapter:
         agent_home: str | Path,
     ) -> RuntimeConfig:
         env = self.environment
-        mcp_path = Path(
-            env.get("MCP_CONFIG_PATH", str(PROJECT_ROOT / "mcp_servers.json"))
-        ).expanduser().resolve()
+        resolved_agent_home = Path(agent_home).expanduser().resolve()
+        mcp_path = resolved_agent_home / "mcp" / "servers.json"
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_path.write_text("{}\n", encoding="utf-8")
         evaluator_model = env.get("GOAL_EVALUATOR_MODEL") or None
         return RuntimeConfig(
             api_key=env["DEEPSEEK_API_KEY"],
@@ -49,7 +50,7 @@ class CodeHarnessAdapter:
             ),
             workspace=Path(workspace).expanduser().resolve(),
             mcp_config_path=mcp_path,
-            agent_home=Path(agent_home).expanduser().resolve(),
+            agent_home=resolved_agent_home,
             evaluator_model=evaluator_model,
         )
 

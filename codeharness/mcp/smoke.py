@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
-# ${WORKSPACE} in mcp_servers.json defaults to the project root.
+# ${WORKSPACE} in the example config defaults to the project root.
 os.environ.setdefault("WORKSPACE", str(PROJECT_ROOT))
 
 from codeharness.mcp import (
@@ -29,7 +29,7 @@ from codeharness.mcp import (
 
 
 def main(server_name: str = "filesystem") -> int:
-    config_path = PROJECT_ROOT / "mcp_servers.json"
+    config_path = PROJECT_ROOT / "mcp_servers.example.json"
     configs = load_config(config_path)
     if server_name not in configs:
         print(f"server '{server_name}' not in {config_path}; have: {list(configs)}")

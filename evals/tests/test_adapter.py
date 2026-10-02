@@ -57,14 +57,14 @@ def test_adapter_builds_case_scoped_runtime_and_runs_optional_goal(tmp_path):
     FakeHarness.instances.clear()
     workspace = tmp_path / "workspace"
     agent_home = tmp_path / "agent-home"
-    mcp_config = tmp_path / "mcp.json"
+    host_mcp_config = tmp_path / "host-mcp.json"
     environment = {
         "DEEPSEEK_API_KEY": "secret",
         "DEEPSEEK_BASE_URL": "https://models.example/v1",
         "DEEPSEEK_MODEL_ID": "deepseek-test",
         "MODEL_CONTEXT_WINDOW": "8192",
         "GOAL_EVALUATOR_MODEL": "judge-test",
-        "MCP_CONFIG_PATH": str(mcp_config),
+        "MCP_CONFIG_PATH": str(host_mcp_config),
     }
     adapter = CodeHarnessAdapter(
         environment=environment,
@@ -76,7 +76,10 @@ def test_adapter_builds_case_scoped_runtime_and_runs_optional_goal(tmp_path):
     harness = FakeHarness.instances[-1]
     assert harness.config.workspace == workspace.resolve()
     assert harness.config.agent_home == agent_home.resolve()
-    assert harness.config.mcp_config_path == mcp_config.resolve()
+    case_mcp_config = agent_home / "mcp/servers.json"
+    assert harness.config.mcp_config_path == case_mcp_config.resolve()
+    assert case_mcp_config.read_text(encoding="utf-8") == "{}\n"
+    assert not host_mcp_config.exists()
     assert harness.config.model == "deepseek-test"
     assert harness.config.model_context_window == 8192
     assert harness.config.evaluator_model == "judge-test"

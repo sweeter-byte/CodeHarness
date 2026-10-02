@@ -32,9 +32,12 @@ class RuntimeConfig:
         load_dotenv(override=True)
         workspace = Path(os.environ.get("WORKSPACE", PROJECT_ROOT)).expanduser().resolve()
         os.environ.setdefault("WORKSPACE", str(workspace))
-        mcp_config_path = Path(
-            os.environ.get("MCP_CONFIG_PATH", PROJECT_ROOT / "mcp_servers.json")
-        ).expanduser().resolve()
+        agent_home = _default_agent_home()
+        mcp_config_path = (
+            Path(os.environ["MCP_CONFIG_PATH"]).expanduser().resolve()
+            if "MCP_CONFIG_PATH" in os.environ
+            else agent_home / "mcp" / "servers.json"
+        )
         return cls(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -46,6 +49,6 @@ class RuntimeConfig:
             ),
             workspace=workspace,
             mcp_config_path=mcp_config_path,
-            agent_home=_default_agent_home(),
+            agent_home=agent_home,
             evaluator_model=os.environ.get("GOAL_EVALUATOR_MODEL") or None,
         )

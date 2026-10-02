@@ -139,6 +139,10 @@ def _worker_environment(
     )
     child_env["WORKSPACE"] = str(workspace)
     child_env["CODEHARNESS_HOME"] = str(agent_home)
+    mcp_config_path = agent_home / "mcp" / "servers.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+    mcp_config_path.write_text("{}\n", encoding="utf-8")
+    child_env["MCP_CONFIG_PATH"] = str(mcp_config_path)
     return child_env
 
 

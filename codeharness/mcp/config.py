@@ -1,6 +1,6 @@
 """Configuration layer for MCP servers.
 
-Loads ``mcp_servers.json`` into validated :class:`ServerConfig` objects.
+Loads an MCP server JSON file into validated :class:`ServerConfig` objects.
 
 Environment-variable policy (two phases):
 
