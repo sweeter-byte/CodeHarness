@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ def run_verifier(
             list(command),
             cwd=Path(workspace),
             capture_output=True,
+            check=False,
             text=True,
             errors="replace",
             timeout=timeout_seconds,
@@ -70,16 +73,42 @@ def _timeout_text(value: str | bytes | None) -> str:
 
 
 def capture_patch(workspace: str | Path) -> tuple[str, str | None]:
-    """Return the binary-capable diff, preserving failures as metadata."""
+    """Return a binary-capable diff including non-ignored untracked files."""
     try:
-        completed = subprocess.run(
-            ["git", "diff", "--no-ext-diff", "--binary", "HEAD"],
-            cwd=Path(workspace),
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=30,
-        )
+        with tempfile.TemporaryDirectory(prefix="codeharness-git-index-") as temp_dir:
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = str(Path(temp_dir) / "index")
+
+            for command, failure_message in (
+                (["git", "read-tree", "HEAD"], "git read-tree failed"),
+                (
+                    ["git", "add", "--intent-to-add", "--", "."],
+                    "git add --intent-to-add failed",
+                ),
+            ):
+                completed = subprocess.run(
+                    command,
+                    cwd=Path(workspace),
+                    env=env,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    errors="replace",
+                    timeout=30,
+                )
+                if completed.returncode != 0:
+                    return "", completed.stderr.strip() or failure_message
+
+            completed = subprocess.run(
+                ["git", "diff", "--no-ext-diff", "--binary", "HEAD"],
+                cwd=Path(workspace),
+                env=env,
+                capture_output=True,
+                check=False,
+                text=True,
+                errors="replace",
+                timeout=30,
+            )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "", str(exc)
     if completed.returncode != 0:

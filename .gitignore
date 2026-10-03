@@ -41,3 +41,8 @@ examples/
 
 # Evaluation output (run artifacts are local-only)
 eval_results/*
+
+# SWE-bench official evaluator artifacts
+logs/evaluation/
+
+scripts/
