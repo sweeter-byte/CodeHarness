@@ -166,7 +166,7 @@ class Agent:
     def _execute_tool(self, handler, tool_call_id, tool_name, args, messages):
         """
         Run PreToolUse hooks → execute (or skip) → run PostToolUse hooks.
-        Returns True if the tool actually executed, False if blocked/rejected.
+        Returns True if the handler was attempted, False if policy prevented it.
         """
         result = self._tool_executor.execute(
             tool_name=tool_name,
@@ -200,7 +200,11 @@ class Agent:
             "tool_call_id": tool_call_id,
             "content": result.output,
         })
-        return result.executed
+        return result.status not in {
+            "blocked",
+            "approval_unavailable",
+            "rejected",
+        }
 
     def agent_loop(self, messages: list) -> str:
         """Run until a final answer / rejection-stop / max_rounds.
@@ -323,11 +327,13 @@ class Agent:
                         })
                         continue
 
-                    executed = self._execute_tool(handler, tc.id, tc.function.name, args, messages)
-                    if not executed:
-                        consecutive_rejections += 1
-                    else:
+                    attempted = self._execute_tool(
+                        handler, tc.id, tc.function.name, args, messages
+                    )
+                    if attempted:
                         consecutive_rejections = 0
+                    else:
+                        consecutive_rejections += 1
 
                 # ── Todo reminder (催更机制) ──
                 # Count once per round; using todo_write in this round resets it.

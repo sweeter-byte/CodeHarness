@@ -80,10 +80,61 @@ def test_executor_runs_allowed_handler_and_post_hook_once():
     )
 
     assert result.executed is True
+    assert result.status == "executed"
     assert result.output == "contents"
     assert calls == ["notes.txt"]
     assert stats["tool_calls"] == 1
     assert [event for event, _args in events] == ["PreToolUse", "PostToolUse"]
+
+
+@pytest.mark.parametrize(
+    ("args", "handler", "exception_name", "message"),
+    [
+        (
+            {"path": "notes.txt", "offset": 480},
+            lambda path, start_line=None, end_line=None, cwd=None: "contents",
+            "TypeError",
+            "unexpected keyword argument 'offset'",
+        ),
+        (
+            {},
+            lambda path: "contents",
+            "TypeError",
+            "missing 1 required positional argument: 'path'",
+        ),
+        (
+            {},
+            lambda: (_ for _ in ()).throw(RuntimeError("handler failed")),
+            "RuntimeError",
+            "handler failed",
+        ),
+    ],
+    ids=["unknown-keyword", "missing-required-argument", "handler-exception"],
+)
+def test_executor_returns_error_for_handler_failure(
+    args, handler, exception_name, message
+):
+    events = []
+    stats = {"tool_calls": 0}
+
+    def trigger(event, *event_args):
+        events.append((event, event_args))
+
+    result = ToolExecutor(trigger).execute(
+        tool_name="read_file",
+        args=args,
+        handler=handler,
+        session_stats=stats,
+    )
+
+    assert result.executed is False
+    assert result.status == "error"
+    assert result.output.startswith(
+        f"Error: Tool 'read_file' failed: {exception_name}:"
+    )
+    assert message in result.output
+    assert stats["tool_calls"] == 1
+    assert [event for event, _args in events] == ["PreToolUse"]
 
 
 def test_executor_does_not_run_handler_or_post_hook_when_pre_hook_denies():
@@ -115,6 +166,7 @@ def test_executor_does_not_run_handler_or_post_hook_when_pre_hook_denies():
 def test_executor_non_interactive_ask_fails_closed_without_approval_callback():
     approvals = []
     calls = []
+    stats = {"tool_calls": 0}
 
     def trigger(event, *_args):
         if event == "PreToolUse":
@@ -127,6 +179,7 @@ def test_executor_non_interactive_ask_fails_closed_without_approval_callback():
         interactive=False,
         approval_handler=lambda reason: approvals.append(reason) or True,
         approval_context="workflow",
+        session_stats=stats,
     )
 
     assert result.executed is False
@@ -134,11 +187,13 @@ def test_executor_non_interactive_ask_fails_closed_without_approval_callback():
     assert "workflow" in result.output.lower()
     assert approvals == []
     assert calls == []
+    assert stats["tool_calls"] == 0
 
 
 def test_executor_interactive_ask_runs_only_after_approval():
     approvals = []
     calls = []
+    stats = {"tool_calls": 0}
 
     def trigger(event, *_args):
         if event == "PreToolUse":
@@ -150,12 +205,14 @@ def test_executor_interactive_ask_runs_only_after_approval():
         args={"path": "notes.txt", "content": "x"},
         handler=lambda **_kwargs: calls.append("rejected") or "unsafe",
         approval_handler=lambda reason: approvals.append(reason) or False,
+        session_stats=stats,
     )
     approved = executor.execute(
         tool_name="write_file",
         args={"path": "notes.txt", "content": "x"},
         handler=lambda **_kwargs: calls.append("approved") or "written",
         approval_handler=lambda reason: approvals.append(reason) or True,
+        session_stats=stats,
     )
 
     assert rejected.executed is False
@@ -164,6 +221,7 @@ def test_executor_interactive_ask_runs_only_after_approval():
     assert approved.output == "written"
     assert approvals == ["approval needed", "approval needed"]
     assert calls == ["approved"]
+    assert stats["tool_calls"] == 1
 
 
 def test_workflow_tool_step_cannot_bypass_bash_deny(monkeypatch, tmp_path):
@@ -241,6 +299,83 @@ def test_workflow_safe_read_uses_workspace_bound_native_handler(
     )
 
     assert result == {"output": "    1\tworkspace contents"}
+
+
+def test_workflow_handler_error_is_reported_as_failure_not_blocked():
+    def handler():
+        raise ValueError("boom")
+
+    runtime = _workflow_runtime(handler)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        runtime._execute_tool_step(
+            _tool_step("explode", {}),
+            WorkflowContext({}),
+            object(),
+            "phase",
+            "run-id",
+        )
+
+    message = str(exc_info.value)
+    assert "ToolStep 'run explode' failed" in message
+    assert "Error: Tool 'explode' failed: ValueError: boom" in message
+    assert "blocked" not in message
+
+
+def test_workflow_allowed_handler_error_keeps_failure_payload():
+    def handler():
+        raise ValueError("boom")
+
+    runtime = _workflow_runtime(handler)
+    step = ToolStep(
+        label="run explode",
+        tool_name="explode",
+        args_template={},
+        output_key="result",
+        allow_failure=True,
+    )
+
+    result = runtime._execute_tool_step(
+        step,
+        WorkflowContext({}),
+        object(),
+        "phase",
+        "run-id",
+    )
+
+    assert result == {
+        "output": "Error: Tool 'explode' failed: ValueError: boom",
+        "error": "boom",
+        "exit_code": -1,
+    }
+
+
+def test_workflow_allowed_empty_handler_error_preserves_empty_reason():
+    def handler():
+        raise ValueError()
+
+    runtime = _workflow_runtime(handler)
+    step = ToolStep(
+        label="run explode",
+        tool_name="explode",
+        args_template={},
+        output_key="result",
+        allow_failure=True,
+    )
+
+    result = runtime._execute_tool_step(
+        step,
+        WorkflowContext({}),
+        object(),
+        "phase",
+        "run-id",
+    )
+
+    assert result == {
+        "output": "Error: Tool 'explode' failed: ValueError: ",
+        "error": "",
+        "exit_code": -1,
+    }
 
 
 @pytest.mark.parametrize(

@@ -29,7 +29,7 @@ class ToolExecutionResult:
 
 
 class ToolExecutor:
-    """Run PreToolUse → approval → handler → statistics → PostToolUse."""
+    """Run PreToolUse → approval → statistics → handler → PostToolUse."""
 
     def __init__(self, hook_runner: HookRunner = hooks.trigger_hooks):
         self._trigger_hooks = hook_runner
@@ -92,8 +92,16 @@ class ToolExecutor:
                 )
                 return ToolExecutionResult(False, output, "rejected", reason)
 
-        output = handler(**args)
         if session_stats is not None:
             session_stats["tool_calls"] += 1
+        try:
+            output = handler(**args)
+        except Exception as exc:
+            output = (
+                f"Error: Tool '{tool_name}' failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return ToolExecutionResult(False, output, "error", str(exc))
+
         self._trigger_hooks("PostToolUse", tool_name, args, output)
         return ToolExecutionResult(True, output, "executed")

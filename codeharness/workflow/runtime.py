@@ -1040,6 +1040,30 @@ class WorkflowRuntime:
 				f"ToolStep '{step.label}' failed: {exc}"
 			) from exc
 
+		if execution.status == "error":
+			elapsed = time.time() - start_time
+			reason = (
+				execution.reason
+				if execution.reason is not None
+				else str(execution.output)
+			)
+			if step.allow_failure:
+				self._bus.emit(step_completed(run_id, phase_name, step.label, {
+					"error": reason, "elapsed": round(elapsed, 1)
+				}))
+				print(
+					f"\033[33m[workflow]     ⚠ {step.label} failed (allowed): "
+					f"{reason}\033[0m"
+				)
+				return ({
+					"output": execution.output,
+					"error": reason,
+					"exit_code": -1,
+				}, False)
+			raise WorkflowError(
+				f"ToolStep '{step.label}' failed: {execution.output}"
+			)
+
 		if not execution.executed:
 			error_msg = (
 				f"ToolStep '{step.label}' blocked: {execution.output}"

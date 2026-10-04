@@ -132,6 +132,142 @@ def test_status_handler_receives_agent_status(monkeypatch):
     assert any("BLOCKED bash: blocked by test" in status for status in statuses)
 
 
+def test_handler_error_is_returned_as_observation_without_rejection_status(
+    monkeypatch,
+):
+    from codeharness.core import agent as agent_module
+
+    monkeypatch.setattr(agent_module, "trigger_hooks", lambda *args: None)
+    statuses = []
+    agent = _agent(agent_module, status_handler=statuses.append)
+    messages = []
+
+    attempted = agent._execute_tool(
+        lambda path: f"read {path}",
+        "call-error",
+        "read_file",
+        {"offset": 480},
+        messages,
+    )
+
+    assert attempted is True
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "call-error"
+    assert messages[-1]["content"].startswith(
+        "Error: Tool 'read_file' failed: TypeError:"
+    )
+    assert "unexpected keyword argument 'offset'" in messages[-1]["content"]
+    assert statuses == []
+    assert agent.session_stats["tool_calls"] == 1
+
+
+def test_non_policy_nonexecution_is_not_treated_as_rejection():
+    from codeharness.core import agent as agent_module
+
+    agent = _agent(agent_module)
+    agent._tool_executor = SimpleNamespace(
+        execute=lambda **_kwargs: SimpleNamespace(
+            executed=False,
+            output="cancelled",
+            status="cancelled",
+            reason=None,
+        )
+    )
+    messages = []
+
+    attempted = agent._execute_tool(
+        lambda: "unused", "call-cancelled", "read_file", {}, messages
+    )
+
+    assert attempted is True
+    assert messages[-1]["content"] == "cancelled"
+
+
+def test_agent_loop_continues_after_repeated_handler_errors(monkeypatch):
+    from codeharness.core import agent as agent_module
+
+    monkeypatch.setattr(agent_module, "trigger_hooks", lambda *args: None)
+
+    class FakeMessage:
+        def __init__(self, content=None, tool_call=None):
+            self.content = content
+            self.tool_calls = [tool_call] if tool_call is not None else None
+
+        def model_dump(self):
+            dumped = {"role": "assistant", "content": self.content}
+            if self.tool_calls:
+                dumped["tool_calls"] = [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                    for call in self.tool_calls
+                ]
+            return dumped
+
+    def tool_call(call_id, arguments):
+        return SimpleNamespace(
+            id=call_id,
+            function=SimpleNamespace(
+                name="read_file",
+                arguments=arguments,
+            ),
+        )
+
+    responses = iter(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=FakeMessage(
+                            tool_call=tool_call(f"bad-{index}", '{"offset": 480}')
+                        )
+                    )
+                ]
+            )
+            for index in range(3)
+        ]
+        + [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=FakeMessage(
+                            tool_call=tool_call("corrected", '{"path": "notes.txt"}')
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=FakeMessage(content="done"))]
+            ),
+        ]
+    )
+    calls = []
+    agent = _agent(
+        agent_module,
+        handlers={"read_file": lambda path: calls.append(path) or "contents"},
+        max_rounds=6,
+    )
+    agent.context_manager.prepare = lambda current_messages: current_messages
+    agent._call_llm = lambda _messages: next(responses)
+    messages = [{"role": "user", "content": "read the file"}]
+
+    result = agent.agent_loop(messages)
+
+    assert result == "done"
+    assert calls == ["notes.txt"]
+    assert sum(
+        message.get("role") == "tool"
+        and message["content"].startswith("Error: Tool 'read_file' failed:")
+        for message in messages
+    ) == 3
+    assert agent.session_stats["tool_calls"] == 4
+
+
 def test_agent_background_bash_always_executes_through_handler(monkeypatch):
     from codeharness.core import agent as agent_module
 
