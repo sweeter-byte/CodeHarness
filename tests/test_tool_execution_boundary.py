@@ -301,6 +301,35 @@ def test_workflow_safe_read_uses_workspace_bound_native_handler(
     assert result == {"output": "    1\tworkspace contents"}
 
 
+def test_base_registry_accepts_workspace_backend_without_changing_tool_schema():
+    class Backend:
+        def bash(self, command, run_in_background=False, cwd=None):
+            return "bash"
+
+        def read_file(self, path, start_line=None, end_line=None, cwd=None):
+            return f"container:{path}"
+
+        def write_file(self, path, content, cwd=None):
+            return "write"
+
+        def edit_file(self, path, old_text, new_text, cwd=None):
+            return "edit"
+
+        def glob(self, pattern, cwd=None):
+            return "glob"
+
+        def grep(self, pattern, path=".", file_pattern=None, cwd=None):
+            return "grep"
+
+    default_names = [schema["function"]["name"] for schema in build_base_registry().schemas]
+    registry = build_base_registry(workspace_backend=Backend())
+
+    assert [schema["function"]["name"] for schema in registry.schemas] == default_names
+    assert registry.get("read_file")(path="requests/utils.py") == (
+        "container:requests/utils.py"
+    )
+
+
 def test_workflow_handler_error_is_reported_as_failure_not_blocked():
     def handler():
         raise ValueError("boom")

@@ -14,12 +14,14 @@ from codeharness.skills.tools import SKILL_HANDLERS, SKILL_TOOLS
 from codeharness.tools.coding import CODING_TOOLS, make_coding_handlers
 from codeharness.tools.registry import ToolRegistry
 from codeharness.tools.todo import TODO_TOOLS, TodoManager, make_todo_handler
+from codeharness.tools.workspace import WorkspaceBackend
 
 
 def build_base_registry(
     todo_manager: TodoManager | None = None,
     background_manager=None,
     workspace: str | None = None,
+    workspace_backend: WorkspaceBackend | None = None,
 ) -> ToolRegistry:
     """Assemble a fresh registry with the base tool set.
 
@@ -40,7 +42,11 @@ def build_base_registry(
     registry = ToolRegistry()
     registry.extend(
         CODING_TOOLS,
-        make_coding_handlers(background_manager, default_cwd=workspace),
+        make_coding_handlers(
+            background_manager,
+            default_cwd=workspace,
+            backend=workspace_backend,
+        ),
     )
     registry.extend(TODO_TOOLS, {"todo_write": make_todo_handler(todo_manager)})
     registry.extend(SKILL_TOOLS, SKILL_HANDLERS)

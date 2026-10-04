@@ -18,6 +18,9 @@ venv/
 .vscode/
 *.swp
 
+# Isolated implementation worktrees
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db

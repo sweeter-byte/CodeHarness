@@ -11,14 +11,17 @@ Tool adapters that belong to other capability modules live there:
   - cron_*        → codeharness/scheduler/cron.py
 """
 
-from codeharness.tools.registry import DuplicateToolError, ToolRegistry
 from codeharness.tools.base import build_base_registry
+from codeharness.tools.registry import DuplicateToolError, ToolRegistry
 from codeharness.tools.todo import TodoManager, make_todo_handler
+from codeharness.tools.workspace import LocalWorkspaceBackend, WorkspaceBackend
 
 __all__ = [
-    "ToolRegistry",
     "DuplicateToolError",
-    "build_base_registry",
+    "LocalWorkspaceBackend",
     "TodoManager",
+    "ToolRegistry",
+    "WorkspaceBackend",
+    "build_base_registry",
     "make_todo_handler",
 ]

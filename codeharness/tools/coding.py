@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 from codeharness.background.manager import BackgroundManager, _format_bash_result
+from codeharness.tools.workspace import LocalWorkspaceBackend, WorkspaceBackend
 
 # ── Tool Schemas ─────────────────────────────────────────────
 
@@ -247,26 +248,24 @@ def run_grep(pattern: str, path: str = ".", file_pattern: str = None,
 def make_coding_handlers(
     background_manager: BackgroundManager | None = None,
     default_cwd: str | None = None,
+    backend: WorkspaceBackend | None = None,
 ) -> dict:
     """Build coding handlers bound to one background manager and workspace."""
-    if background_manager is None:
-        background_manager = BackgroundManager()
-
-    def _cwd(cwd: str | None) -> str | None:
-        return cwd if cwd is not None else default_cwd
+    selected = (
+        backend
+        if backend is not None
+        else LocalWorkspaceBackend(
+            background_manager=background_manager,
+            default_cwd=default_cwd,
+        )
+    )
 
     def bash(
         command: str,
         run_in_background: bool = False,
         cwd: str | None = None,
     ) -> str:
-        effective_cwd = _cwd(cwd)
-        if run_in_background:
-            bg_id, error = background_manager.start(command, cwd=effective_cwd)
-            if bg_id is not None:
-                return f"[Background task {bg_id} started: {command}]"
-            return error
-        return run_bash(command, cwd=effective_cwd)
+        return selected.bash(command, run_in_background, cwd=cwd)
 
     def read_file(
         path: str,
@@ -274,10 +273,10 @@ def make_coding_handlers(
         end_line: int = None,
         cwd: str | None = None,
     ) -> str:
-        return run_read(path, start_line, end_line, cwd=_cwd(cwd))
+        return selected.read_file(path, start_line, end_line, cwd=cwd)
 
     def write_file(path: str, content: str, cwd: str | None = None) -> str:
-        return run_write(path, content, cwd=_cwd(cwd))
+        return selected.write_file(path, content, cwd=cwd)
 
     def edit_file(
         path: str,
@@ -285,10 +284,10 @@ def make_coding_handlers(
         new_text: str,
         cwd: str | None = None,
     ) -> str:
-        return run_edit(path, old_text, new_text, cwd=_cwd(cwd))
+        return selected.edit_file(path, old_text, new_text, cwd=cwd)
 
     def glob(pattern: str, cwd: str | None = None) -> str:
-        return run_glob(pattern, cwd=_cwd(cwd))
+        return selected.glob(pattern, cwd=cwd)
 
     def grep(
         pattern: str,
@@ -296,7 +295,7 @@ def make_coding_handlers(
         file_pattern: str = None,
         cwd: str | None = None,
     ) -> str:
-        return run_grep(pattern, path, file_pattern, cwd=_cwd(cwd))
+        return selected.grep(pattern, path, file_pattern, cwd=cwd)
 
     return {
         "bash": bash,
