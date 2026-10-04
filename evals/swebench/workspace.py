@@ -10,6 +10,8 @@ from pathlib import Path
 
 from evals.swebench.dataset import SWEbenchInstance
 
+RUNTIME_EXCLUDE_RULE = b".codeharness/"
+
 
 class WorkspacePreparationError(RuntimeError):
     """Raised when a SWE-bench repository cannot be prepared safely."""
@@ -100,6 +102,39 @@ class SWEbenchWorkspaceManager:
             raise WorkspacePreparationError(f"{label} failed: {detail}")
         return completed
 
+    def _configure_local_excludes(self, workspace: Path) -> None:
+        """Ignore evaluation runtime data without modifying repository files."""
+        result = self._run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=workspace,
+            label="git rev-parse info/exclude",
+        )
+        raw_path = result.stdout.rstrip("\r\n")
+        if not raw_path:
+            raise WorkspacePreparationError(
+                "git rev-parse info/exclude returned an empty path"
+            )
+        exclude_path = Path(raw_path)
+        if not exclude_path.is_absolute():
+            exclude_path = workspace / exclude_path
+
+        try:
+            existing = exclude_path.read_bytes() if exclude_path.exists() else b""
+            if RUNTIME_EXCLUDE_RULE in existing.splitlines():
+                return
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            separator = (
+                b""
+                if not existing or existing.endswith((b"\n", b"\r"))
+                else b"\n"
+            )
+            with exclude_path.open("ab") as stream:
+                stream.write(separator + RUNTIME_EXCLUDE_RULE + b"\n")
+        except OSError as exc:
+            raise WorkspacePreparationError(
+                f"failed to configure local Git excludes: {exc}"
+            ) from exc
+
     def prepare(self, instance: SWEbenchInstance) -> PreparedSWEbenchWorkspace:
         instance_id = self._safe_instance_id(instance.instance_id)
         case_root = (self.work_root / self.run_id / instance_id).resolve()
@@ -129,6 +164,7 @@ class SWEbenchWorkspaceManager:
                 "checkout HEAD mismatch: "
                 f"expected {instance.base_commit}, got {head or '<empty>'}"
             )
+        self._configure_local_excludes(workspace)
         status = self._run(
             ["git", "status", "--porcelain"],
             cwd=workspace,

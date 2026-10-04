@@ -7,6 +7,7 @@ import pytest
 
 from evals.adapters.codeharness import AdapterResult
 from evals.runner.runner import WorkerProcessResult
+from evals.runner.verifier import capture_patch
 from evals.swebench.adapter import build_parser, run_single_instance
 from evals.swebench.dataset import (
     DEFAULT_DATASET_NAME,
@@ -114,6 +115,8 @@ class RecordingGitRunner:
             stdout = ""
         elif command[:3] == ["git", "rev-parse", "HEAD"]:
             stdout = f"{self.head}\n"
+        elif command[:3] == ["git", "rev-parse", "--git-path"]:
+            stdout = ".git/info/exclude\n"
         elif command[:3] == ["git", "status", "--porcelain"]:
             stdout = self.status
         else:
@@ -158,8 +161,145 @@ def test_workspace_clones_checks_out_and_verifies_exact_head(tmp_path):
             prepared.workspace,
         ),
         (["git", "rev-parse", "HEAD"], prepared.workspace),
+        (
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            prepared.workspace,
+        ),
         (["git", "status", "--porcelain"], prepared.workspace),
     ]
+
+
+def test_workspace_preparation_ignores_runtime_artifacts_and_keeps_source_files(
+    tmp_path,
+):
+    source = tmp_path / "source"
+    _init_git_workspace(source)
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    manager = SWEbenchWorkspaceManager(
+        "run-1",
+        work_root=tmp_path / "work",
+        repository_root=tmp_path / "codeharness",
+    )
+    manager.clone_url = lambda _repo: str(source)
+
+    prepared = manager.prepare(_instance(base_commit=base_commit))
+    exclude_path = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=prepared.workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    exclude_path = Path(exclude_path)
+    if not exclude_path.is_absolute():
+        exclude_path = prepared.workspace / exclude_path
+
+    assert ".codeharness/" in exclude_path.read_text().splitlines()
+
+    artifact = prepared.workspace / ".codeharness/artifacts/tool-test.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("runtime artifact\n", encoding="utf-8")
+    source_file = prepared.workspace / "new_source.py"
+    source_file.write_text("value = 1\n", encoding="utf-8")
+
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=prepared.workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    patch, error = capture_patch(prepared.workspace)
+
+    assert ".codeharness" not in status
+    assert "?? new_source.py" in status
+    assert error is None
+    assert ".codeharness" not in patch
+    assert "diff --git a/new_source.py b/new_source.py" in patch
+
+
+def test_workspace_local_exclude_preserves_content_and_is_idempotent(tmp_path):
+    workspace = tmp_path / "workspace"
+    _init_git_workspace(workspace)
+    manager = SWEbenchWorkspaceManager(
+        "run-1",
+        work_root=tmp_path / "work",
+        repository_root=tmp_path / "codeharness",
+    )
+    exclude_path = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    exclude_path = Path(exclude_path)
+    if not exclude_path.is_absolute():
+        exclude_path = workspace / exclude_path
+    original = b"# existing local rules\n*.scratch"
+    exclude_path.write_bytes(original)
+
+    manager._configure_local_excludes(workspace)
+    manager._configure_local_excludes(workspace)
+
+    contents = exclude_path.read_bytes()
+    assert contents == original + b"\n.codeharness/\n"
+    assert contents.splitlines().count(b".codeharness/") == 1
+
+
+def test_workspace_local_exclude_uses_git_path_and_creates_missing_file(tmp_path):
+    workspace = tmp_path / "workspace"
+    git_dir = tmp_path / "git-data"
+    subprocess.run(
+        ["git", "init", "-q", "--separate-git-dir", str(git_dir), str(workspace)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=workspace,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=workspace, check=True
+    )
+    (workspace / "module.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "module.py"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=workspace, check=True)
+    exclude_path = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    if not exclude_path.is_absolute():
+        exclude_path = workspace / exclude_path
+    exclude_path.unlink()
+    manager = SWEbenchWorkspaceManager(
+        "run-1",
+        work_root=tmp_path / "work",
+        repository_root=tmp_path / "codeharness",
+    )
+
+    manager._configure_local_excludes(workspace)
+
+    assert (workspace / ".git").is_file()
+    assert exclude_path.read_bytes() == b".codeharness/\n"
+    assert subprocess.run(
+        ["git", "status", "--short"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
 
 
 def test_workspace_rejects_head_mismatch(tmp_path):
