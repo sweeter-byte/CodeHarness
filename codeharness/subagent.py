@@ -1,6 +1,8 @@
 import os
-from codeharness.tools import build_base_registry, TodoManager
+
+from codeharness.core.prompt import SKILL_ROUTING_RULES
 from codeharness.skills.tools import SKILL_LOADER
+from codeharness.tools import TodoManager, build_base_registry
 
 
 def build_sub_system(workspace: str | None) -> str:
@@ -14,7 +16,8 @@ def build_sub_system(workspace: str | None) -> str:
         "text. So your last message must be a complete, self-contained summary of "
         "the result (findings, file changes, or why you failed).\n\n"
         f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
-        "Use load_skill to read the full instructions when a skill applies."
+        "Use load_skill to read the full instructions when a skill applies.\n"
+        f"{SKILL_ROUTING_RULES}"
     )
 
 

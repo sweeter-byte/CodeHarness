@@ -22,15 +22,20 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-from codeharness.tasks import TASKS, TASK_TOOLS, TASK_HANDLERS
-from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
+from codeharness.core.prompt import SKILL_ROUTING_RULES
 from codeharness.skills.tools import SKILL_LOADER
-from codeharness.team.bus import BUS, LEADER
+from codeharness.tasks import TASK_HANDLERS, TASK_TOOLS, TASKS
 from codeharness.team import protocol
+from codeharness.team.bus import BUS, LEADER
 from codeharness.team.protocol import (
-	GATE_NOT_REQUIRED, GATE_PENDING, GATE_REQUIRED, GATE_APPROVED,
-	GATE_REJECTED, BLOCKING_GATES,
+	BLOCKING_GATES,
+	GATE_APPROVED,
+	GATE_NOT_REQUIRED,
+	GATE_PENDING,
+	GATE_REJECTED,
+	GATE_REQUIRED,
 )
+from codeharness.tools import TodoManager, WorkspaceBackend, build_base_registry
 
 IDLE_SCAN_INTERVAL = 2.0     # seconds between shared-task-board scans
 TEAMMATE_MAX_ROUNDS = 60
@@ -162,7 +167,8 @@ def teammate_system(state: TeammateState) -> str:
 		"complete_task + a clear summary does.\n"
 		f"{plan_rules}\n"
 		f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
-		"Use load_skill to read the full instructions when a skill applies."
+		"Use load_skill to read the full instructions when a skill applies.\n"
+		f"{SKILL_ROUTING_RULES}"
 	)
 
 
