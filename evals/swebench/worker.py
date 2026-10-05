@@ -11,6 +11,8 @@ from typing import Any
 
 from evals.adapters.codeharness import AdapterResult, CodeHarnessAdapter
 from evals.runner.runner import _redact_text
+from evals.swebench.docker_workspace import DockerWorkspaceBackend
+from evals.swebench.docker_worktree import DockerWorktreeEnvironment
 
 TASK_PREFIX = """You are working on a SWE-bench repository checkout.
 Resolve the issue described below.
@@ -25,17 +27,30 @@ ZERO_STATS = {
 
 
 class SWEbenchCodeHarnessAdapter(CodeHarnessAdapter):
-    """Run a plain SWE-bench task using the existing runtime construction."""
+    """Run a SWE-bench task in host mode or one borrowed container."""
 
     def run_task(
         self,
         task: str,
         workspace: str | Path,
         agent_home: str | Path,
+        container_id: str | None = None,
     ) -> AdapterResult:
-        harness = self.harness_factory(
-            self.build_config(workspace=workspace, agent_home=agent_home)
-        )
+        if container_id is not None and not container_id.strip():
+            raise ValueError("container_id must be a non-empty Docker name or ID")
+        config = self.build_config(workspace=workspace, agent_home=agent_home)
+        if container_id is None:
+            harness = self.harness_factory(config)
+        else:
+            workspace_backend = DockerWorkspaceBackend(container_id)
+            worktree_environment = DockerWorktreeEnvironment(container_id)
+            harness = self.harness_factory(
+                config,
+                workspace_backend=workspace_backend,
+                tool_workspace="/testbed",
+                worktree_environment=worktree_environment,
+                tool_worktrees="/tmp/codeharness-worktrees",
+            )
         try:
             harness.start()
             final_answer = harness.run(task)
@@ -64,18 +79,25 @@ def run_worker(
     result_path: str | Path,
     *,
     agent_home: str | Path,
+    container_id: str | None = None,
     environment: Mapping[str, str] | None = None,
     adapter_factory: Callable[..., Any] = SWEbenchCodeHarnessAdapter,
 ) -> int:
+    """Run one task; ``workspace`` always stores host-side Runtime state."""
     env = environment if environment is not None else os.environ
     output_path = Path(result_path)
     try:
         task = f"{TASK_PREFIX}\n\n{problem_statement}"
-        result = adapter_factory(env).run_task(
+        task_adapter = adapter_factory(env)
+        task_args = (
             task,
             Path(workspace).expanduser().resolve(),
             Path(agent_home).expanduser().resolve(),
         )
+        if container_id is None:
+            result = task_adapter.run_task(*task_args)
+        else:
+            result = task_adapter.run_task(*task_args, container_id=container_id)
         _write_result(
             output_path,
             {
@@ -104,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--problem-statement", required=True)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--agent-home", required=True, type=Path)
+    parser.add_argument(
+        "--container-id",
+        help=(
+            "borrowed Docker container ID or name for coding execution; "
+            "--workspace remains the host Runtime-state directory"
+        ),
+    )
     parser.add_argument("--result", required=True, type=Path)
     return parser
 
@@ -115,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         args.workspace,
         args.result,
         agent_home=args.agent_home,
+        container_id=args.container_id,
     )
 
 
