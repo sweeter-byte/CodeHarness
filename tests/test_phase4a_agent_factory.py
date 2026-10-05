@@ -413,6 +413,7 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         "model": "runtime-model",
         "model_context_window": 123456,
         "workspace": str(tmp_path),
+        "workspace_backend": None,
         "memory_dir": harness.paths.project_memory_dir,
         "approval_handler": None,
         "status_handler": None,
@@ -420,6 +421,42 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         "session_stats_lock": harness._session_stats_lock,
         "workflow_catalog": harness.workflow_registry.catalog(),
     }]
+
+
+def test_runtime_agent_factory_propagates_tool_workspace_and_backend(
+    monkeypatch, tmp_path
+):
+    from codeharness import app as app_module
+    from codeharness.config import RuntimeConfig
+
+    created = []
+    backend = object()
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    config = RuntimeConfig(
+        api_key="key",
+        base_url="https://example.invalid",
+        model="runtime-model",
+        model_context_window=123456,
+        workspace=Path(tmp_path),
+        mcp_config_path=Path(tmp_path) / "mcp.json",
+        agent_home=Path(tmp_path) / "agent-home",
+    )
+    harness = app_module.CodeHarness(
+        config,
+        workspace_backend=backend,
+        tool_workspace="/testbed",
+    )
+    harness.client = object()
+    monkeypatch.setattr(app_module, "Agent", FakeAgent)
+
+    harness.create_agent(system="child")
+
+    assert created[0]["workspace"] == "/testbed"
+    assert created[0]["workspace_backend"] is backend
 
 
 def test_runtime_agent_factory_respects_explicit_overrides(monkeypatch, tmp_path):

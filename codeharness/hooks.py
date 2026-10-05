@@ -64,10 +64,10 @@ _perm_manager = PermissionManager()
 
 
 def configure_permissions(allowed_dirs):
-    """Re-root the shared PermissionManager at the Runtime workspace.
+    """Re-root the shared PermissionManager at the logical tool workspace.
 
     Called by CodeHarness.start() so the native-tool permission boundary
-    follows RuntimeConfig.workspace instead of the import-time os.getcwd().
+    follows CodeHarness.tool_workspace instead of the import-time os.getcwd().
     The first allowed directory doubles as base_dir: relative paths in
     permission checks resolve against the same workspace the coding tool
     handlers use. The dependency stays Runtime → Permission; permission.py

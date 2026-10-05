@@ -54,7 +54,36 @@ class _FakeMCPManager:
         self.closed = True
 
 
-def _started_runtime(monkeypatch, workspace):
+class _RecordingWorkspaceBackend:
+    def __init__(self):
+        self.calls = []
+
+    def bash(self, command, run_in_background=False, cwd=None):
+        self.calls.append(("bash", command, run_in_background, cwd))
+        return f"backend-bash:{command}"
+
+    def read_file(self, path, start_line=None, end_line=None, cwd=None):
+        self.calls.append(("read_file", path, start_line, end_line, cwd))
+        return f"backend-read:{path}"
+
+    def write_file(self, path, content, cwd=None):
+        self.calls.append(("write_file", path, content, cwd))
+        return f"backend-write:{path}"
+
+    def edit_file(self, path, old_text, new_text, cwd=None):
+        self.calls.append(("edit_file", path, old_text, new_text, cwd))
+        return f"backend-edit:{path}"
+
+    def glob(self, pattern, cwd=None):
+        self.calls.append(("glob", pattern, cwd))
+        return f"backend-glob:{pattern}"
+
+    def grep(self, pattern, path=".", file_pattern=None, cwd=None):
+        self.calls.append(("grep", pattern, path, file_pattern, cwd))
+        return f"backend-grep:{pattern}"
+
+
+def _started_runtime(monkeypatch, workspace, **harness_kwargs):
     """Build and start a CodeHarness Runtime with all I/O stubbed out."""
     from codeharness import app as app_module
     from codeharness.config import RuntimeConfig
@@ -81,7 +110,7 @@ def _started_runtime(monkeypatch, workspace):
         mcp_config_path=workspace / "mcp.json",
         agent_home=workspace / "agent-home",
     )
-    harness = app_module.CodeHarness(config)
+    harness = app_module.CodeHarness(config, **harness_kwargs)
     harness.start()
     return harness
 
@@ -128,6 +157,22 @@ def test_agent_default_registry_uses_agent_workspace(tmp_path):
 
     assert (workspace / "agent.txt").read_text() == "bound"
     assert a.handlers["bash"](command="pwd") == str(workspace)
+
+
+def test_agent_default_registry_uses_injected_workspace_backend():
+    from codeharness.core import agent as agent_module
+
+    backend = _RecordingWorkspaceBackend()
+    agent = _bare_agent(
+        agent_module,
+        workspace="/testbed",
+        workspace_backend=backend,
+    )
+
+    assert agent.handlers["read_file"](path="src/app.py") == (
+        "backend-read:src/app.py"
+    )
+    assert backend.calls == [("read_file", "src/app.py", None, None, None)]
 
 
 def test_no_process_global_todo_or_background_default_exists():
@@ -260,6 +305,9 @@ def test_runtime_leader_coding_tools_use_configured_workspace(monkeypatch, tmp_p
     harness = _started_runtime(monkeypatch, workspace)
     monkeypatch.chdir(process_cwd)
 
+    assert harness.workspace_backend is None
+    assert harness.tool_workspace == str(workspace)
+
     write_result = harness.agent.handlers["write_file"](
         path="leader.txt", content="leader workspace"
     )
@@ -271,6 +319,124 @@ def test_runtime_leader_coding_tools_use_configured_workspace(monkeypatch, tmp_p
     assert bash_result == str(workspace)
     assert (workspace / "leader.txt").read_text() == "leader workspace"
     assert not (process_cwd / "leader.txt").exists()
+
+
+def test_runtime_keeps_state_on_host_when_tool_workspace_differs(
+    monkeypatch, tmp_path
+):
+    from codeharness import hooks
+
+    host_workspace = tmp_path / "host-state"
+    backend = _RecordingWorkspaceBackend()
+    harness = _started_runtime(
+        monkeypatch,
+        host_workspace,
+        workspace_backend=backend,
+        tool_workspace="/testbed",
+    )
+
+    assert harness.paths.workspace == host_workspace.resolve()
+    assert harness.paths.tasks_dir == host_workspace / ".codeharness/state/tasks"
+    assert harness.paths.workflow_runs_dir == (
+        host_workspace / ".codeharness/runs/workflows"
+    )
+    assert harness.tool_workspace == "/testbed"
+    assert hooks._perm_manager.allowed_dirs == [Path("/testbed")]
+    assert hooks._perm_manager.base_dir == Path("/testbed")
+    assert hooks._perm_manager.check(
+        "read_file", {"path": "/testbed/src/app.py"}
+    )[0] == "allow"
+    assert hooks._perm_manager.check(
+        "read_file", {"path": "/host-secret.txt"}
+    )[0] == "ask"
+
+
+def test_runtime_leader_uses_injected_workspace_backend(monkeypatch, tmp_path):
+    from codeharness.tools import coding
+
+    backend = _RecordingWorkspaceBackend()
+    monkeypatch.setattr(
+        coding,
+        "run_read",
+        lambda *args, **kwargs: pytest.fail("host read implementation called"),
+    )
+    harness = _started_runtime(
+        monkeypatch,
+        tmp_path,
+        workspace_backend=backend,
+        tool_workspace="/testbed",
+    )
+
+    assert harness.agent.handlers["read_file"](path="leader.py") == (
+        "backend-read:leader.py"
+    )
+    assert harness.agent.handlers["bash"](command="pwd") == "backend-bash:pwd"
+    assert "You are a coding agent at /testbed." in harness.agent.system
+    assert backend.calls == [
+        ("read_file", "leader.py", None, None, None),
+        ("bash", "pwd", False, None),
+    ]
+
+
+def test_runtime_subagent_inherits_injected_workspace_backend(
+    monkeypatch, tmp_path
+):
+    from codeharness.core import agent as agent_module
+    from codeharness.tools import coding
+
+    backend = _RecordingWorkspaceBackend()
+    harness = _started_runtime(
+        monkeypatch,
+        tmp_path,
+        workspace_backend=backend,
+        tool_workspace="/testbed",
+    )
+    monkeypatch.setattr(
+        coding,
+        "run_read",
+        lambda *args, **kwargs: pytest.fail("host read implementation called"),
+    )
+    monkeypatch.setattr(
+        agent_module.Agent,
+        "agent_loop",
+        lambda self, messages: self.handlers["read_file"](path="child.py"),
+    )
+
+    result = harness.agent.handlers["task"]("inspect child.py")
+
+    assert result == "backend-read:child.py"
+    assert backend.calls == [("read_file", "child.py", None, None, None)]
+
+
+def test_workflow_reuses_runtime_registry_workspace_backend(monkeypatch, tmp_path):
+    from codeharness.workflow.definition import ToolStep
+    from codeharness.workflow.runtime import WorkflowContext
+
+    backend = _RecordingWorkspaceBackend()
+    harness = _started_runtime(
+        monkeypatch,
+        tmp_path,
+        workspace_backend=backend,
+        tool_workspace="/testbed",
+    )
+    step = ToolStep(
+        label="read through runtime registry",
+        tool_name="read_file",
+        args_template={"path": "workflow.py"},
+        output_key="result",
+    )
+
+    result = harness.workflow_runtime._execute_tool_step(
+        step,
+        WorkflowContext({}),
+        object(),
+        "phase",
+        "run-id",
+    )
+
+    assert harness.workflow_runtime._tool_registry is harness.registry
+    assert result == {"output": "backend-read:workflow.py"}
+    assert backend.calls == [("read_file", "workflow.py", None, None, None)]
 
 
 # ── 9: Stop hook receives the Runtime session_stats ───────────

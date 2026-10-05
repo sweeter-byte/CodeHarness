@@ -4,7 +4,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from openai import OpenAI
-from codeharness.tools import build_base_registry, TodoManager
+from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
 from codeharness import hooks
 from codeharness.hooks import new_session_stats, trigger_hooks
 from codeharness.tools.executor import ToolExecutor
@@ -38,6 +38,7 @@ class Agent:
                  model: str = None,
                  model_context_window: int = None,
                  workspace: str = None,
+                 workspace_backend: WorkspaceBackend | None = None,
                  approval_handler: Callable[[str], bool] | None = None,
                  status_handler: Callable[[str], None] | None = None,
                  goal_controller: GoalController = None,
@@ -104,6 +105,7 @@ class Agent:
                 todo_manager=self.todo_manager,
                 background_manager=self.background_manager,
                 workspace=self.workspace,
+                workspace_backend=workspace_backend,
             )
             self.tools = tools if tools is not None else registry.schemas
             self.handlers = handlers if handlers is not None else registry.handlers

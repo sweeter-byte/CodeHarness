@@ -44,7 +44,7 @@ from codeharness.mcp import (
     load_config,
     shutdown_runtime,
 )
-from codeharness.tools import build_base_registry, TodoManager
+from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
 
 
 CLOSE_TIMEOUT = 5.0
@@ -53,8 +53,17 @@ CLOSE_TIMEOUT = 5.0
 class CodeHarness:
     """Unified backend API for one leader Agent runtime."""
 
-    def __init__(self, config: RuntimeConfig):
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        workspace_backend: WorkspaceBackend | None = None,
+        tool_workspace: str | None = None,
+    ):
         self.config = config
+        self.workspace_backend = workspace_backend
+        self.tool_workspace = (
+            str(config.workspace) if tool_workspace is None else tool_workspace
+        )
         self.paths = RuntimePaths.build(
             workspace=config.workspace,
             agent_home=config.agent_home,
@@ -124,7 +133,8 @@ class CodeHarness:
             "client": self.client,
             "model": self.config.model,
             "model_context_window": self.config.model_context_window,
-            "workspace": str(self.paths.workspace),
+            "workspace": self.tool_workspace,
+            "workspace_backend": self.workspace_backend,
             "memory_dir": self.paths.project_memory_dir,
             "approval_handler": self.approval_handler,
             "status_handler": self.status_handler,
@@ -154,12 +164,12 @@ class CodeHarness:
             api_key=self.config.api_key,
             base_url=self.config.base_url,
         )
-        # Root native-tool permissions at the configured workspace, not at
-        # the import-time cwd. Dependency direction stays Runtime → Permission.
-        hooks.configure_permissions([str(self.paths.workspace)])
+        # Native-tool permissions follow the logical coding workspace. Runtime
+        # state remains rooted at self.paths.workspace on the host.
+        hooks.configure_permissions([self.tool_workspace])
         configure_subagent_agent_factory(
             self.create_agent,
-            workspace=str(self.paths.workspace),
+            workspace=self.tool_workspace,
         )
         TEAM.set_agent_factory(self.create_agent)
 
@@ -170,7 +180,8 @@ class CodeHarness:
         registry = build_base_registry(
             todo_manager=self.todo_manager,
             background_manager=self.background_manager,
-            workspace=str(self.paths.workspace),
+            workspace=self.tool_workspace,
+            workspace_backend=self.workspace_backend,
         )
         registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)

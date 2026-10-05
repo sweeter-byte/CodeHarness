@@ -92,10 +92,9 @@ class PermissionManager:
         else:
             self.allowed_dirs = [Path(os.getcwd()).resolve()]
         # Base directory for resolving RELATIVE paths in safety checks. The
-        # Runtime passes its workspace here so permission checks evaluate the
-        # same paths the coding tool handlers (bound to RuntimeConfig.workspace)
-        # will actually touch. When absent (standalone construction in tests)
-        # we fall back to the process cwd, preserving the old behavior.
+        # Runtime passes its logical tool workspace here so permission checks
+        # evaluate the same paths the coding backend sees. When absent
+        # (standalone construction in tests), fall back to the process cwd.
         if base_dir is not None:
             self.base_dir = Path(base_dir).expanduser().resolve()
         else:
@@ -125,8 +124,8 @@ class PermissionManager:
         """Resolve a possibly-relative path against self.base_dir.
 
         Single resolution entry point for every path safety check: relative
-        paths are anchored to base_dir (the Runtime workspace), never to the
-        implicit process cwd.
+        paths are anchored to base_dir (the logical tool workspace), never to
+        the implicit process cwd.
         """
         p = Path(path_str).expanduser()
         if not p.is_absolute():
