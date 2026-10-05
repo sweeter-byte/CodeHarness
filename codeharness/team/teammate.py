@@ -23,7 +23,7 @@ import threading
 from dataclasses import dataclass, field
 
 from codeharness.tasks import TASKS, TASK_TOOLS, TASK_HANDLERS
-from codeharness.tools import build_base_registry, TodoManager
+from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
 from codeharness.skills.tools import SKILL_LOADER
 from codeharness.team.bus import BUS, LEADER
 from codeharness.team import protocol
@@ -169,7 +169,11 @@ def teammate_system(state: TeammateState) -> str:
 # ── Handler factory ───────────────────────────────────────────
 
 
-def make_teammate_handlers(state: TeammateState, background_manager) -> dict:
+def make_teammate_handlers(
+	state: TeammateState,
+	background_manager,
+	workspace_backend: WorkspaceBackend | None = None,
+) -> dict:
 	"""Build the teammate's handler map from the base handlers.
 
 	Workspace tools: assignment check → plan gate → cwd injection.
@@ -182,6 +186,7 @@ def make_teammate_handlers(state: TeammateState, background_manager) -> dict:
 	base_registry = build_base_registry(
 		todo_manager=state.todo,
 		background_manager=background_manager,
+		workspace_backend=workspace_backend,
 	)
 	handlers = {
 		name: handler for name, handler in base_registry.handlers.items()

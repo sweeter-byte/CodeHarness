@@ -83,6 +83,19 @@ class _RecordingWorkspaceBackend:
         return f"backend-grep:{pattern}"
 
 
+class _RecordingWorktreeEnvironment:
+    def __init__(self):
+        self.calls = []
+
+    def git(self, args, cwd):
+        self.calls.append(("git", list(args), str(cwd)))
+        return 0, ""
+
+    def path_exists(self, path):
+        self.calls.append(("path_exists", str(path)))
+        return False
+
+
 def _started_runtime(monkeypatch, workspace, **harness_kwargs):
     """Build and start a CodeHarness Runtime with all I/O stubbed out."""
     from codeharness import app as app_module
@@ -110,6 +123,15 @@ def _started_runtime(monkeypatch, workspace, **harness_kwargs):
         mcp_config_path=workspace / "mcp.json",
         agent_home=workspace / "agent-home",
     )
+    if harness_kwargs.get("workspace_backend") is not None:
+        harness_kwargs.setdefault(
+            "worktree_environment",
+            _RecordingWorktreeEnvironment(),
+        )
+        harness_kwargs.setdefault(
+            "tool_worktrees",
+            "/tmp/codeharness-worktrees",
+        )
     harness = app_module.CodeHarness(config, **harness_kwargs)
     harness.start()
     return harness
@@ -341,7 +363,15 @@ def test_runtime_keeps_state_on_host_when_tool_workspace_differs(
         host_workspace / ".codeharness/runs/workflows"
     )
     assert harness.tool_workspace == "/testbed"
-    assert hooks._perm_manager.allowed_dirs == [Path("/testbed")]
+    assert harness.tool_worktrees == "/tmp/codeharness-worktrees"
+    assert harness.paths.worktrees_dir == (
+        host_workspace / ".codeharness/worktrees"
+    )
+    assert not harness.paths.worktrees_dir.exists()
+    assert hooks._perm_manager.allowed_dirs == [
+        Path("/testbed"),
+        Path("/tmp/codeharness-worktrees"),
+    ]
     assert hooks._perm_manager.base_dir == Path("/testbed")
     assert hooks._perm_manager.check(
         "read_file", {"path": "/testbed/src/app.py"}
@@ -352,14 +382,25 @@ def test_runtime_keeps_state_on_host_when_tool_workspace_differs(
 
 
 def test_runtime_leader_uses_injected_workspace_backend(monkeypatch, tmp_path):
+    from codeharness.team import TEAM
     from codeharness.tools import coding
 
     backend = _RecordingWorkspaceBackend()
-    monkeypatch.setattr(
-        coding,
+    for name in (
+        "run_bash",
         "run_read",
-        lambda *args, **kwargs: pytest.fail("host read implementation called"),
-    )
+        "run_write",
+        "run_edit",
+        "run_glob",
+        "run_grep",
+    ):
+        monkeypatch.setattr(
+            coding,
+            name,
+            lambda *args, **kwargs: pytest.fail(
+                "host coding implementation called"
+            ),
+        )
     harness = _started_runtime(
         monkeypatch,
         tmp_path,
@@ -372,6 +413,7 @@ def test_runtime_leader_uses_injected_workspace_backend(monkeypatch, tmp_path):
     )
     assert harness.agent.handlers["bash"](command="pwd") == "backend-bash:pwd"
     assert "You are a coding agent at /testbed." in harness.agent.system
+    assert TEAM._workspace_backend is backend
     assert backend.calls == [
         ("read_file", "leader.py", None, None, None),
         ("bash", "pwd", False, None),
@@ -391,21 +433,50 @@ def test_runtime_subagent_inherits_injected_workspace_backend(
         workspace_backend=backend,
         tool_workspace="/testbed",
     )
-    monkeypatch.setattr(
-        coding,
+    for name in (
+        "run_bash",
         "run_read",
-        lambda *args, **kwargs: pytest.fail("host read implementation called"),
-    )
+        "run_write",
+        "run_edit",
+        "run_glob",
+        "run_grep",
+    ):
+        monkeypatch.setattr(
+            coding,
+            name,
+            lambda *args, **kwargs: pytest.fail(
+                "host coding implementation called"
+            ),
+        )
+
+    def exercise_all_coding_tools(self, messages):
+        result = self.handlers["read_file"](path="child.py")
+        self.handlers["bash"](command="pwd")
+        self.handlers["write_file"](path="child.py", content="x")
+        self.handlers["edit_file"](
+            path="child.py", old_text="x", new_text="y"
+        )
+        self.handlers["glob"](pattern="*.py")
+        self.handlers["grep"](pattern="needle")
+        return result
+
     monkeypatch.setattr(
         agent_module.Agent,
         "agent_loop",
-        lambda self, messages: self.handlers["read_file"](path="child.py"),
+        exercise_all_coding_tools,
     )
 
     result = harness.agent.handlers["task"]("inspect child.py")
 
     assert result == "backend-read:child.py"
-    assert backend.calls == [("read_file", "child.py", None, None, None)]
+    assert backend.calls == [
+        ("read_file", "child.py", None, None, None),
+        ("bash", "pwd", False, None),
+        ("write_file", "child.py", "x", None),
+        ("edit_file", "child.py", "x", "y", None),
+        ("glob", "*.py", None),
+        ("grep", "needle", ".", None, None),
+    ]
 
 
 def test_workflow_reuses_runtime_registry_workspace_backend(monkeypatch, tmp_path):

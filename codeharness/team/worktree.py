@@ -5,37 +5,94 @@ NOT a security sandbox; shell commands can still reach anything the
 process can access. Creation and removal are leader-only operations.
 """
 
+from __future__ import annotations
+
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol
 
 from codeharness.tasks import TASKS
 
 BRANCH_PREFIX = "wt/"
 _workspace_root: Path | None = None
 _worktrees_dir: Path | None = None
+_environment: WorktreeEnvironment | None = None
+
+
+class WorktreeEnvironment(Protocol):
+	"""Minimal execution boundary required by Team worktree operations."""
+
+	def git(
+		self,
+		args: Sequence[str],
+		cwd: str | Path,
+	) -> tuple[int, str]: ...
+
+	def path_exists(self, path: str | Path) -> bool: ...
+
+
+class LocalWorktreeEnvironment:
+	"""Run worktree Git and existence checks on the host."""
+
+	def git(
+		self,
+		args: Sequence[str],
+		cwd: str | Path,
+	) -> tuple[int, str]:
+		try:
+			r = subprocess.run(
+				["git", *args],
+				cwd=str(cwd),
+				capture_output=True,
+				text=True,
+				errors="replace",
+				timeout=60,
+				check=False,
+			)
+			return r.returncode, (r.stdout + r.stderr).strip()
+		except (subprocess.TimeoutExpired, OSError) as exc:
+			return -1, str(exc)
+
+	def path_exists(self, path: str | Path) -> bool:
+		return Path(path).exists()
 
 
 def configure_worktrees(
-	workspace_root: str | Path, worktrees_dir: str | Path,
+	workspace_root: str | Path,
+	worktrees_dir: str | Path,
+	environment: WorktreeEnvironment | None = None,
 ) -> None:
 	"""Configure explicit roots for all worktree operations."""
-	global _workspace_root, _worktrees_dir
-	_workspace_root = Path(workspace_root).expanduser().resolve()
-	_worktrees_dir = Path(worktrees_dir).expanduser().resolve()
+	global _workspace_root, _worktrees_dir, _environment
+	if environment is None:
+		_environment = LocalWorktreeEnvironment()
+		_workspace_root = Path(workspace_root).expanduser().resolve()
+		_worktrees_dir = Path(worktrees_dir).expanduser().resolve()
+	else:
+		workspace_path = Path(workspace_root)
+		worktrees_path = Path(worktrees_dir)
+		if not workspace_path.is_absolute() or not worktrees_path.is_absolute():
+			raise ValueError("logical worktree roots must be absolute paths")
+		_environment = environment
+		_workspace_root = workspace_path
+		_worktrees_dir = worktrees_path
 
 
 def _git(args: list[str], cwd: str | Path | None = None) -> tuple[int, str]:
 	"""Run a git command; returns (exit_code, combined_output)."""
-	try:
-		r = subprocess.run(
-			["git"] + args,
-			cwd=str(cwd) if cwd else None,
-			capture_output=True, text=True, errors="replace", timeout=60,
-		)
-		return r.returncode, (r.stdout + r.stderr).strip()
-	except (subprocess.TimeoutExpired, OSError) as e:
-		return -1, str(e)
+	if _environment is None:
+		return -1, "worktree environment is not configured; start CodeHarness first"
+	if cwd is None:
+		return -1, "git cwd is not configured; start CodeHarness first"
+	return _environment.git(args, cwd)
+
+
+def _path_exists(path: str | Path) -> bool:
+	if _environment is None:
+		return False
+	return _environment.path_exists(path)
 
 
 def _validate_name(name: str) -> str | None:
@@ -84,7 +141,7 @@ def create_worktree(name: str, task_id: str) -> tuple[str | None, str | None]:
 		path = worktree_path(name)
 	except RuntimeError as exc:
 		return None, str(exc)
-	if path.exists():
+	if _path_exists(path):
 		return None, f"Worktree directory already exists: {path}"
 
 	code, out = _git(
@@ -100,7 +157,7 @@ def create_worktree(name: str, task_id: str) -> tuple[str | None, str | None]:
 		)
 		if bc == 0:
 			partial.append(f"branch {BRANCH_PREFIX + name}")
-		if path.exists():
+		if _path_exists(path):
 			partial.append(f"directory {path}")
 		msg = f"git worktree add failed: {out}"
 		if partial:
@@ -129,7 +186,7 @@ def resolve_worktree_cwd(task) -> tuple[str | None, str | None]:
 	if task.worktree is None:
 		return str(_workspace_root), None
 	path = worktree_path(task.worktree)
-	if not path.exists():
+	if not _path_exists(path):
 		return None, f"Bound worktree does not exist: {path}"
 	code, out = _git(["rev-parse", "--is-inside-work-tree"], cwd=path)
 	if code != 0:
@@ -155,7 +212,7 @@ def remove_worktree(name: str, force: bool = False) -> tuple[bool, str]:
 		path = worktree_path(name)
 	except RuntimeError as exc:
 		return False, str(exc)
-	if not path.exists():
+	if not _path_exists(path):
 		return False, f"Worktree does not exist: {path}"
 
 	# 1. No unfinished task bound to this worktree.
@@ -167,7 +224,7 @@ def remove_worktree(name: str, force: bool = False) -> tuple[bool, str]:
 	# 2. No teammate currently assigned to it (check live registry).
 	from codeharness.team.manager import TEAM
 	for state in TEAM.list_states():
-		if state.assignment and Path(state.assignment.get("cwd", "")) == path.resolve():
+		if state.assignment and Path(state.assignment.get("cwd", "")) == path:
 			return False, (f"Teammate {state.name} is still working in "
 						   f"'{name}'; shut it down or let it finish first")
 

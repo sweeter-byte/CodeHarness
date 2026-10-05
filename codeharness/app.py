@@ -2,6 +2,7 @@
 
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -22,7 +23,11 @@ from codeharness.tasks import (
 )
 from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
 from codeharness.team.bus import BUS
-from codeharness.team.worktree import configure_worktrees
+from codeharness.team.worktree import (
+    LocalWorktreeEnvironment,
+    WorktreeEnvironment,
+    configure_worktrees,
+)
 from codeharness.team import wakeup as team_wakeup
 from codeharness.workflow import (
     WORKFLOW_TOOLS,
@@ -58,15 +63,34 @@ class CodeHarness:
         config: RuntimeConfig,
         workspace_backend: WorkspaceBackend | None = None,
         tool_workspace: str | None = None,
+        worktree_environment: WorktreeEnvironment | None = None,
+        tool_worktrees: str | None = None,
     ):
         self.config = config
+        self.paths = RuntimePaths.build(
+            workspace=config.workspace,
+            agent_home=config.agent_home,
+        )
+        if workspace_backend is not None and (
+            worktree_environment is None or tool_worktrees is None
+        ):
+            raise ValueError(
+                "non-local workspace backend requires an explicit worktree "
+                "environment and logical worktree root"
+            )
         self.workspace_backend = workspace_backend
         self.tool_workspace = (
             str(config.workspace) if tool_workspace is None else tool_workspace
         )
-        self.paths = RuntimePaths.build(
-            workspace=config.workspace,
-            agent_home=config.agent_home,
+        self.worktree_environment = (
+            worktree_environment
+            if worktree_environment is not None
+            else LocalWorktreeEnvironment()
+        )
+        self.tool_worktrees = (
+            str(self.paths.worktrees_dir)
+            if tool_worktrees is None
+            else tool_worktrees
         )
         self.client = None
         self.registry = None
@@ -156,7 +180,11 @@ class CodeHarness:
 
         TASKS.set_directory(self.paths.tasks_dir)
         BUS.configure(self.paths.mailboxes_dir)
-        configure_worktrees(self.paths.workspace, self.paths.worktrees_dir)
+        configure_worktrees(
+            self.tool_workspace,
+            self.tool_worktrees,
+            environment=self.worktree_environment,
+        )
         ARTIFACT_STORE.configure(self.paths.artifacts_dir)
         TRANSCRIPT_STORE.configure(self.paths.transcripts_dir)
 
@@ -166,12 +194,20 @@ class CodeHarness:
         )
         # Native-tool permissions follow the logical coding workspace. Runtime
         # state remains rooted at self.paths.workspace on the host.
-        hooks.configure_permissions([self.tool_workspace])
+        permission_roots = [self.tool_workspace]
+        try:
+            Path(self.tool_worktrees).relative_to(Path(self.tool_workspace))
+        except ValueError:
+            permission_roots.append(self.tool_worktrees)
+        hooks.configure_permissions(permission_roots)
         configure_subagent_agent_factory(
             self.create_agent,
             workspace=self.tool_workspace,
         )
-        TEAM.set_agent_factory(self.create_agent)
+        TEAM.set_agent_factory(
+            self.create_agent,
+            workspace_backend=self.workspace_backend,
+        )
 
         # Runtime-owned mutable state for the leader.
         self.todo_manager = TodoManager()

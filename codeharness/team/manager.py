@@ -25,10 +25,12 @@ class TeamManager:
 		self._states: dict[str, TeammateState] = {}
 		self._lock = threading.Lock()
 		self._agent_factory = None
+		self._workspace_backend = None
 
-	def set_agent_factory(self, factory) -> None:
+	def set_agent_factory(self, factory, workspace_backend=None) -> None:
 		"""Configure the Runtime-owned factory used for teammate agents."""
 		self._agent_factory = factory
+		self._workspace_backend = workspace_backend
 
 	# ── registry helpers ──
 
@@ -106,7 +108,11 @@ class TeamManager:
 		state.agent = self._agent_factory(
 			system=teammate_system(state),
 			tools=list(TEAMMATE_TOOLS),
-			handlers=make_teammate_handlers(state, teammate_bg),
+			handlers=make_teammate_handlers(
+				state,
+				teammate_bg,
+				workspace_backend=self._workspace_backend,
+			),
 			max_rounds=TEAMMATE_MAX_ROUNDS,
 			todo_manager=state.todo,
 			memory_manager=False,          # leader owns cross-session memory

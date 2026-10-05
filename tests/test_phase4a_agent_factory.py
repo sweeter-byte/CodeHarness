@@ -432,6 +432,13 @@ def test_runtime_agent_factory_propagates_tool_workspace_and_backend(
     created = []
     backend = object()
 
+    class WorktreeEnvironment:
+        def git(self, args, cwd):
+            return 0, ""
+
+        def path_exists(self, path):
+            return False
+
     class FakeAgent:
         def __init__(self, **kwargs):
             created.append(kwargs)
@@ -449,6 +456,8 @@ def test_runtime_agent_factory_propagates_tool_workspace_and_backend(
         config,
         workspace_backend=backend,
         tool_workspace="/testbed",
+        worktree_environment=WorktreeEnvironment(),
+        tool_worktrees="/tmp/codeharness-worktrees",
     )
     harness.client = object()
     monkeypatch.setattr(app_module, "Agent", FakeAgent)
@@ -457,6 +466,30 @@ def test_runtime_agent_factory_propagates_tool_workspace_and_backend(
 
     assert created[0]["workspace"] == "/testbed"
     assert created[0]["workspace_backend"] is backend
+
+
+def test_runtime_rejects_nonlocal_backend_without_worktree_configuration(
+    tmp_path,
+):
+    from codeharness import app as app_module
+    from codeharness.config import RuntimeConfig
+
+    config = RuntimeConfig(
+        api_key="key",
+        base_url="https://example.invalid",
+        model="runtime-model",
+        model_context_window=123456,
+        workspace=Path(tmp_path),
+        mcp_config_path=Path(tmp_path) / "mcp.json",
+        agent_home=Path(tmp_path) / "agent-home",
+    )
+
+    with pytest.raises(ValueError, match="worktree"):
+        app_module.CodeHarness(
+            config,
+            workspace_backend=object(),
+            tool_workspace="/testbed",
+        )
 
 
 def test_runtime_agent_factory_respects_explicit_overrides(monkeypatch, tmp_path):
