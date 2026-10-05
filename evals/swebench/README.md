@@ -4,11 +4,11 @@ SWE-bench provides public, repository-level software-engineering tasks and an
 official Docker evaluator. This adapter connects one selected SWE-bench task to
 CodeHarness without adding SWE-bench to the normal CodeHarness runtime.
 
-The adapter loads one dataset row, clones its repository at `base_commit` into
-an external temporary directory, runs one isolated CodeHarness worker with the
-row's `problem_statement`, captures the Git diff, and writes an official-format
-prediction. It never applies the gold patch or test patch and does not decide
-whether a task is resolved.
+The adapter loads one dataset row, starts its official SWE-bench image, snapshots
+the startup `/testbed` filesystem, and lends that container to one isolated
+CodeHarness worker. The parent process captures the final container diff, removes
+the rollout container, and writes an official-format prediction. It never passes
+the gold patch, test patch, evaluator script, or hidden test lists to the worker.
 
 ## Optional dependencies
 
@@ -37,8 +37,8 @@ python -m evals.swebench.adapter --instance-id <instance_id>
 
 The defaults are dataset `SWE-bench/SWE-bench_Lite`, split `test`, and a
 30-minute worker timeout. Override them with `--dataset-name`, `--split`, and
-`--timeout`. This command runs the agent and generates a prediction only; it
-does not start Docker.
+`--timeout`. This command runs the agent in a disposable official rollout
+container and generates a prediction; it does not run the official evaluator.
 
 ## Run the official evaluator explicitly
 
@@ -48,13 +48,11 @@ python -m evals.swebench.adapter \
   --evaluate
 ```
 
-`--evaluate` performs three preflight checks: the `swebench` module must be
-installed, the Docker executable must exist, and the Docker daemon must be
-accessible. It then invokes the official evaluator with the selected dataset,
-split, prediction, instance ID, run ID, and `--max_workers 1`. The official
-evaluator uses Docker to create the task-specific environment and perform its
-own patch application, test discovery, FAIL_TO_PASS/PASS_TO_PASS checks, and
-resolved decision.
+After the candidate patch is frozen and the rollout container has been removed,
+`--evaluate` invokes the official evaluator with the selected dataset, split,
+prediction, instance ID, run ID, and `--max_workers 1`. The evaluator creates a
+fresh task-specific container for patch application, test discovery,
+FAIL_TO_PASS/PASS_TO_PASS checks, and the resolved decision.
 
 Before evaluating a CodeHarness prediction, first follow the upstream
 SWE-bench gold-patch evaluation procedure manually. A successful gold run
@@ -63,14 +61,17 @@ of this adapter. CodeHarness does not run the gold patch automatically.
 
 ## Isolation and artifacts
 
-The disposable checkout and case-local agent state live under:
+Host-only runtime state and case-local agent state live under:
 
 ```text
 /tmp/codeharness-swebench/<run-id>/<instance-id>/
-├── workspace/
+├── runtime-state/
 ├── agent-home/
 └── prediction.jsonl
 ```
+
+The source of truth is `/testbed` in the official rollout container. The host
+runtime directory is only the worker process cwd and is not a repository clone.
 
 The persistent artifacts live under:
 
@@ -78,6 +79,7 @@ The persistent artifacts live under:
 eval_results/swebench/<run-id>/
 ├── config.json
 ├── instance.json
+├── rollout.json
 ├── prediction.jsonl
 ├── agent.stdout.log
 ├── agent.stderr.log
@@ -85,9 +87,10 @@ eval_results/swebench/<run-id>/
 └── result.json
 ```
 
-The agent uses an empty case-local MCP configuration and does not inherit the
-user's global MCP servers. Known API-key values are redacted from persisted
-artifacts.
+`instance.json` contains only public task identity/input fields and the official
+image reference; hidden scoring fields are not persisted there. The agent uses
+an empty case-local MCP configuration and does not inherit the user's global MCP
+servers. Known API-key values are redacted from persisted artifacts.
 
 This phase supports exactly one instance per invocation. Fixed subsets, batch
 execution, concurrency, retries, pass@k, and leaderboards are future work.

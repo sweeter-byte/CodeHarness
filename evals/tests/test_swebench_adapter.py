@@ -2,9 +2,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import evals.swebench.adapter as swebench_adapter
 from evals.adapters.codeharness import AdapterResult
 from evals.runner.runner import WorkerProcessResult
 from evals.runner.verifier import capture_patch
@@ -25,6 +27,7 @@ from evals.swebench.prediction import build_prediction, write_prediction
 from evals.swebench.worker import TASK_PREFIX, run_worker
 from evals.swebench.workspace import (
     PreparedSWEbenchWorkspace,
+    SWEbenchRuntimeWorkspaceManager,
     SWEbenchWorkspaceManager,
     WorkspacePreparationError,
 )
@@ -38,6 +41,11 @@ def _raw_instance(**overrides):
         "problem_statement": "Fix the public behavior.",
         "patch": "GOLD PATCH MUST STAY PRIVATE",
         "test_patch": "TEST PATCH MUST STAY PRIVATE",
+        "FAIL_TO_PASS": '["test_failure"]',
+        "PASS_TO_PASS": '["test_regression"]',
+        "eval_script": "hidden evaluator script",
+        "hints_text": "hidden hint",
+        "image": "swebench/sweb.eval.x86_64.owner_1776_repo-123:latest",
         "version": "1.0",
     }
     payload.update(overrides)
@@ -93,6 +101,25 @@ def test_workspace_root_must_be_outside_codeharness_repository(tmp_path):
             work_root=repository_root / "work",
             repository_root=repository_root,
         )
+
+
+def test_runtime_workspace_creates_only_host_state_directories(tmp_path):
+    manager = SWEbenchRuntimeWorkspaceManager(
+        "run-1",
+        work_root=tmp_path / "work",
+    )
+
+    prepared = manager.prepare(_instance())
+
+    assert prepared.case_root == (
+        tmp_path / "work/run-1/owner__repo-123"
+    ).resolve()
+    assert prepared.workspace == prepared.case_root / "runtime-state"
+    assert prepared.agent_home == prepared.case_root / "agent-home"
+    assert prepared.workspace.is_dir()
+    assert prepared.agent_home.is_dir()
+    assert not (prepared.case_root / "workspace").exists()
+    assert not (prepared.workspace / ".git").exists()
 
 
 class RecordingGitRunner:
@@ -527,44 +554,13 @@ class StaticWorkspaceManager:
         return self.prepared
 
 
-def _prepared_workspace(tmp_path):
+def _prepared_runtime_workspace(tmp_path):
     case_root = tmp_path / "work/run-1/owner__repo-123"
-    workspace = case_root / "workspace"
+    workspace = case_root / "runtime-state"
     agent_home = case_root / "agent-home"
-    _init_git_workspace(workspace)
+    workspace.mkdir(parents=True)
     agent_home.mkdir()
     return PreparedSWEbenchWorkspace(case_root, workspace, agent_home)
-
-
-def _worker_that_changes_file(captured, secret=None):
-    def fake_runner(command, *, workspace, environment, timeout_seconds):
-        captured.update(
-            command=list(command),
-            workspace=workspace,
-            environment=dict(environment),
-            timeout_seconds=timeout_seconds,
-        )
-        (workspace / "module.py").write_text("value = 2\n", encoding="utf-8")
-        result_path = Path(command[command.index("--result") + 1])
-        result_path.write_text(
-            json.dumps(
-                {
-                    "final_answer": f"done {secret or ''}",
-                    "session_stats": {
-                        "prompt_tokens": 2,
-                        "completion_tokens": 3,
-                        "total_tokens": 5,
-                        "tool_calls": 1,
-                    },
-                    "worker_status": "completed",
-                    "error": None,
-                }
-            ),
-            encoding="utf-8",
-        )
-        return WorkerProcessResult(0, f"stdout {secret or ''}", "", False, 0.25)
-
-    return fake_runner
 
 
 def _environment(secret="adapter-secret"):
@@ -575,12 +571,155 @@ def _environment(secret="adapter-secret"):
     }
 
 
-def test_single_instance_run_writes_artifacts_without_official_evaluation(tmp_path):
-    prepared = _prepared_workspace(tmp_path)
+class FakeRollout:
+    def __init__(self, events, *, start_error=None):
+        self.events = events
+        self.start_error = start_error
+        self.closed = False
+        self.container_id = "borrowed-container-id"
+        self.info = SimpleNamespace(
+            instance_id="owner__repo-123",
+            image="official-image:latest",
+            image_id="sha256:image",
+            container_name="codeharness.test",
+            container_id=self.container_id,
+            initial_head="a" * 40,
+            initial_status="",
+            python_path="/opt/python/bin/python",
+            python_version="Python 3.11.9",
+        )
+
+    def start(self):
+        self.events.append("rollout.start")
+        if self.start_error is not None:
+            raise self.start_error
+        return self.info
+
+    def close(self):
+        if not self.closed:
+            self.events.append("rollout.close")
+            self.closed = True
+
+
+class FakeCollector:
+    def __init__(
+        self,
+        container_id,
+        events,
+        *,
+        patch="diff --git a/module.py b/module.py\n+container change\n",
+        patch_error=None,
+        snapshot_error=None,
+        capture_error=None,
+    ):
+        self.container_id = container_id
+        self.events = events
+        self.patch = patch
+        self.patch_error = patch_error
+        self.snapshot_error = snapshot_error
+        self.capture_error = capture_error
+        self.closed = False
+
+    def snapshot_baseline(self):
+        self.events.append("collector.snapshot")
+        if self.snapshot_error is not None:
+            raise self.snapshot_error
+        return "baseline-tree"
+
+    def capture_patch(self):
+        self.events.append("collector.capture")
+        if self.capture_error is not None:
+            raise self.capture_error
+        return self.patch, self.patch_error
+
+    def close(self):
+        if not self.closed:
+            self.events.append("collector.close")
+            self.closed = True
+
+
+def _worker_runner(
+    events,
+    captured,
+    *,
+    process=None,
+    write_result=True,
+    secret=None,
+    error=None,
+):
+    def fake_runner(command, *, workspace, environment, timeout_seconds):
+        events.append("worker")
+        captured.update(
+            command=list(command),
+            workspace=workspace,
+            environment=dict(environment),
+            timeout_seconds=timeout_seconds,
+        )
+        if error is not None:
+            raise error
+        if write_result:
+            result_path = Path(command[command.index("--result") + 1])
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "final_answer": f"done {secret or ''}",
+                        "session_stats": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                            "total_tokens": 5,
+                            "tool_calls": 1,
+                        },
+                        "worker_status": "completed",
+                        "error": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return process or WorkerProcessResult(
+            0, f"stdout {secret or ''}", "", False, 0.25
+        )
+
+    return fake_runner
+
+
+def _orchestration_kwargs(tmp_path, events, rollout, collector, worker):
+    return {
+        "instance_id": "owner__repo-123",
+        "results_root": tmp_path / "results",
+        "environment": _environment(),
+        "run_id": "run-1",
+        "dataset_loader": lambda *_args, **_kwargs: [_raw_instance()],
+        "workspace_manager": StaticWorkspaceManager(
+            _prepared_runtime_workspace(tmp_path)
+        ),
+        "rollout_container_factory": lambda _instance, _run_id: rollout,
+        "patch_collector_factory": lambda container_id: collector,
+        "worker_process_runner": worker,
+    }
+
+
+def test_single_instance_orchestrates_borrowed_container_and_writes_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    prepared = _prepared_runtime_workspace(tmp_path)
     manager = StaticWorkspaceManager(prepared)
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(rollout.container_id, events)
     captured = {}
     evaluator_called = False
     secret = "adapter-secret"
+
+    def forbidden_host_capture(_workspace):
+        raise AssertionError("host capture_patch must not be called")
+
+    monkeypatch.setattr(
+        swebench_adapter,
+        "capture_patch",
+        forbidden_host_capture,
+        raising=False,
+    )
 
     def unexpected_evaluator(**kwargs):
         nonlocal evaluator_called
@@ -594,11 +733,26 @@ def test_single_instance_run_writes_artifacts_without_official_evaluation(tmp_pa
         run_id="run-1",
         dataset_loader=lambda *_args, **_kwargs: [_raw_instance()],
         workspace_manager=manager,
-        worker_process_runner=_worker_that_changes_file(captured, secret),
+        rollout_container_factory=lambda _instance, _run_id: rollout,
+        patch_collector_factory=lambda container_id: collector,
+        worker_process_runner=_worker_runner(
+            events,
+            captured,
+            secret=secret,
+        ),
         official_evaluator=unexpected_evaluator,
     )
 
     assert run_root == tmp_path / "results/swebench/run-1"
+    assert events == [
+        "rollout.start",
+        "collector.snapshot",
+        "worker",
+        "collector.capture",
+        "collector.close",
+        "rollout.close",
+    ]
+    assert collector.container_id == rollout.container_id
     assert manager.instances[0].instance_id == "owner__repo-123"
     assert captured["workspace"] == prepared.workspace
     assert captured["timeout_seconds"] == 47
@@ -608,6 +762,17 @@ def test_single_instance_run_writes_artifacts_without_official_evaluation(tmp_pa
     assert problem == "Fix the public behavior."
     assert "GOLD PATCH" not in problem
     assert "TEST PATCH" not in problem
+    assert command[command.index("--container-id") + 1] == rollout.container_id
+    assert command[command.index("--workspace") + 1] == str(prepared.workspace)
+    command_text = " ".join(command)
+    for forbidden in (
+        "official-image:latest",
+        "FAIL_TO_PASS",
+        "PASS_TO_PASS",
+        "hidden evaluator script",
+        "hidden hint",
+    ):
+        assert forbidden not in command_text
     assert captured["environment"]["CODEHARNESS_HOME"] == str(prepared.agent_home)
     mcp_path = Path(captured["environment"]["MCP_CONFIG_PATH"])
     assert mcp_path == prepared.agent_home / "mcp/servers.json"
@@ -615,7 +780,7 @@ def test_single_instance_run_writes_artifacts_without_official_evaluation(tmp_pa
     prediction = json.loads((run_root / "prediction.jsonl").read_text())
     assert prediction["instance_id"] == "owner__repo-123"
     assert prediction["model_name_or_path"] == "CodeHarness::deepseek-test"
-    assert "+value = 2" in prediction["model_patch"]
+    assert prediction["model_patch"] == collector.patch
     assert (prepared.case_root / "prediction.jsonl").read_text() == (
         run_root / "prediction.jsonl"
     ).read_text()
@@ -625,16 +790,84 @@ def test_single_instance_run_writes_artifacts_without_official_evaluation(tmp_pa
     assert result["official_evaluation"] is None
     assert result["total_tokens"] == 5
     assert evaluator_called is False
+    instance_metadata = json.loads((run_root / "instance.json").read_text())
+    assert instance_metadata == {
+        "instance_id": "owner__repo-123",
+        "repo": "owner/repo",
+        "base_commit": "a" * 40,
+        "problem_statement": "Fix the public behavior.",
+        "image": _raw_instance()["image"],
+    }
+    rollout_metadata = json.loads((run_root / "rollout.json").read_text())
+    assert rollout_metadata == {
+        "image": "official-image:latest",
+        "image_id": "sha256:image",
+        "container_name": "codeharness.test",
+        "container_id": "borrowed-container-id",
+        "initial_head": "a" * 40,
+        "initial_status": "",
+        "python_path": "/opt/python/bin/python",
+        "python_version": "Python 3.11.9",
+    }
     for artifact in run_root.iterdir():
         if artifact.is_file():
             assert secret not in artifact.read_text(errors="replace")
 
 
-def test_single_instance_run_calls_official_evaluator_only_when_requested(tmp_path):
-    prepared = _prepared_workspace(tmp_path)
+def test_single_instance_default_workspace_does_not_clone_repository(
+    tmp_path,
+    monkeypatch,
+):
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(rollout.container_id, events, patch="")
+    captured = {}
+
+    class ForbiddenCloneManager:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("host repository clone manager must not be used")
+
+    monkeypatch.setattr(
+        swebench_adapter,
+        "SWEbenchWorkspaceManager",
+        ForbiddenCloneManager,
+        raising=False,
+    )
+
+    run_single_instance(
+        instance_id="owner__repo-123",
+        results_root=tmp_path / "results",
+        work_root=tmp_path / "work",
+        environment=_environment(),
+        run_id="run-1",
+        dataset_loader=lambda *_args, **_kwargs: [_raw_instance()],
+        rollout_container_factory=lambda _instance, _run_id: rollout,
+        patch_collector_factory=lambda container_id: collector,
+        worker_process_runner=_worker_runner(events, captured),
+    )
+
+    runtime_state = (
+        tmp_path / "work/run-1/owner__repo-123/runtime-state"
+    ).resolve()
+    assert captured["workspace"] == runtime_state
+    assert runtime_state.is_dir()
+    assert (runtime_state.parent / "agent-home").is_dir()
+    assert not (runtime_state.parent / "workspace").exists()
+    assert not (runtime_state / ".git").exists()
+
+
+def test_official_evaluator_runs_after_prediction_and_rollout_cleanup(tmp_path):
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(rollout.container_id, events)
+    captured = {}
     calls = []
 
     def fake_evaluator(**kwargs):
+        events.append("evaluator")
+        assert rollout.closed is True
+        prediction = json.loads(kwargs["predictions_path"].read_text())
+        assert prediction["model_patch"] == collector.patch
         calls.append(kwargs)
         return {
             "command": ["python", "-m", "swebench.harness.run_evaluation"],
@@ -643,18 +876,20 @@ def test_single_instance_run_calls_official_evaluator_only_when_requested(tmp_pa
             "stderr": "",
         }
 
+    kwargs = _orchestration_kwargs(
+        tmp_path,
+        events,
+        rollout,
+        collector,
+        _worker_runner(events, captured),
+    )
     run_root, result = run_single_instance(
-        instance_id="owner__repo-123",
         evaluate=True,
-        results_root=tmp_path / "results",
-        environment=_environment(),
-        run_id="run-1",
-        dataset_loader=lambda *_args, **_kwargs: [_raw_instance()],
-        workspace_manager=StaticWorkspaceManager(prepared),
-        worker_process_runner=_worker_that_changes_file({}),
         official_evaluator=fake_evaluator,
+        **kwargs,
     )
 
+    assert events[-3:] == ["collector.close", "rollout.close", "evaluator"]
     assert calls == [
         {
             "dataset_name": DEFAULT_DATASET_NAME,
@@ -667,56 +902,183 @@ def test_single_instance_run_calls_official_evaluator_only_when_requested(tmp_pa
     assert result["official_evaluation"]["return_code"] == 0
 
 
-def test_single_instance_run_records_empty_patch(tmp_path):
-    prepared = _prepared_workspace(tmp_path)
-
-    def unchanged_worker(command, *, workspace, environment, timeout_seconds):
-        result_path = Path(command[command.index("--result") + 1])
-        result_path.write_text(
-            json.dumps(
-                {
-                    "final_answer": "no change",
-                    "session_stats": {},
-                    "worker_status": "completed",
-                    "error": None,
-                }
-            )
-        )
-        return WorkerProcessResult(0, "", "", False, 0.1)
+@pytest.mark.parametrize(
+    ("process", "write_result", "expected_status"),
+    [
+        (WorkerProcessResult(-15, "partial", "timed out", True, 1.1), False, "timeout"),
+        (WorkerProcessResult(2, "partial", "failed", False, 0.2), True, "crashed"),
+        (WorkerProcessResult(0, "partial", "", False, 0.2), False, "crashed"),
+    ],
+    ids=("timeout", "nonzero", "missing-result"),
+)
+def test_worker_failure_results_still_capture_container_patch(
+    tmp_path,
+    process,
+    write_result,
+    expected_status,
+):
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(rollout.container_id, events)
+    captured = {}
+    kwargs = _orchestration_kwargs(
+        tmp_path,
+        events,
+        rollout,
+        collector,
+        _worker_runner(
+            events,
+            captured,
+            process=process,
+            write_result=write_result,
+        ),
+    )
 
     run_root, result = run_single_instance(
-        instance_id="owner__repo-123",
-        results_root=tmp_path / "results",
-        environment=_environment(),
-        run_id="run-1",
-        dataset_loader=lambda *_args, **_kwargs: [_raw_instance()],
-        workspace_manager=StaticWorkspaceManager(prepared),
-        worker_process_runner=unchanged_worker,
+        **kwargs,
     )
 
+    assert "collector.capture" in events
+    assert events.index("collector.capture") < events.index("rollout.close")
+    assert result["worker_status"] == expected_status
+    assert json.loads((run_root / "prediction.jsonl").read_text())[
+        "model_patch"
+    ] == collector.patch
+
+
+@pytest.mark.parametrize(
+    ("patch_error", "expected_error"),
+    [(None, None), ("container capture failed", "container capture failed")],
+    ids=("empty", "capture-error"),
+)
+def test_empty_container_patch_remains_a_valid_prediction(
+    tmp_path,
+    patch_error,
+    expected_error,
+):
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(
+        rollout.container_id,
+        events,
+        patch="",
+        patch_error=patch_error,
+    )
+    kwargs = _orchestration_kwargs(
+        tmp_path,
+        events,
+        rollout,
+        collector,
+        _worker_runner(events, {}),
+    )
+
+    run_root, result = run_single_instance(
+        **kwargs,
+    )
+
+    prediction = json.loads((run_root / "prediction.jsonl").read_text())
+    assert prediction["model_patch"] == ""
     assert result["empty_patch"] is True
-    assert json.loads((run_root / "prediction.jsonl").read_text())["model_patch"] == ""
+    assert result["patch_error"] == expected_error
 
 
-def test_single_instance_run_records_worker_timeout(tmp_path):
-    prepared = _prepared_workspace(tmp_path)
-
-    def timed_out_worker(command, *, workspace, environment, timeout_seconds):
-        return WorkerProcessResult(-15, "partial", "timed out", True, 1.1)
-
-    _, result = run_single_instance(
-        instance_id="owner__repo-123",
-        timeout_seconds=1,
-        results_root=tmp_path / "results",
-        environment=_environment(),
-        run_id="run-1",
-        dataset_loader=lambda *_args, **_kwargs: [_raw_instance()],
-        workspace_manager=StaticWorkspaceManager(prepared),
-        worker_process_runner=timed_out_worker,
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_events"),
+    [
+        ("start", ["rollout.start", "rollout.close"]),
+        (
+            "snapshot",
+            [
+                "rollout.start",
+                "collector.snapshot",
+                "collector.close",
+                "rollout.close",
+            ],
+        ),
+        (
+            "worker",
+            [
+                "rollout.start",
+                "collector.snapshot",
+                "worker",
+                "collector.close",
+                "rollout.close",
+            ],
+        ),
+        (
+            "capture",
+            [
+                "rollout.start",
+                "collector.snapshot",
+                "worker",
+                "collector.capture",
+                "collector.close",
+                "rollout.close",
+            ],
+        ),
+    ],
+)
+def test_orchestration_exception_cleans_up_owned_resources(
+    tmp_path,
+    failure_stage,
+    expected_events,
+):
+    events = []
+    error = RuntimeError(f"{failure_stage} failed")
+    rollout = FakeRollout(
+        events,
+        start_error=error if failure_stage == "start" else None,
+    )
+    collector = FakeCollector(
+        rollout.container_id,
+        events,
+        snapshot_error=error if failure_stage == "snapshot" else None,
+        capture_error=error if failure_stage == "capture" else None,
+    )
+    worker = _worker_runner(
+        events,
+        {},
+        error=error if failure_stage == "worker" else None,
+    )
+    kwargs = _orchestration_kwargs(
+        tmp_path,
+        events,
+        rollout,
+        collector,
+        worker,
     )
 
-    assert result["timeout"] is True
-    assert result["worker_status"] == "timeout"
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        run_single_instance(**kwargs)
+
+    assert events == expected_events
+
+
+def test_evaluator_failure_occurs_after_rollout_cleanup(tmp_path):
+    events = []
+    rollout = FakeRollout(events)
+    collector = FakeCollector(rollout.container_id, events)
+    kwargs = _orchestration_kwargs(
+        tmp_path,
+        events,
+        rollout,
+        collector,
+        _worker_runner(events, {}),
+    )
+
+    def failing_evaluator(**_kwargs):
+        events.append("evaluator")
+        assert rollout.closed is True
+        raise RuntimeError("evaluator failed")
+
+    with pytest.raises(RuntimeError, match="evaluator failed"):
+        run_single_instance(
+            evaluate=True,
+            official_evaluator=failing_evaluator,
+            **kwargs,
+        )
+
+    assert events[-2:] == ["rollout.close", "evaluator"]
 
 
 def test_cli_defaults_to_prediction_only_and_accepts_explicit_evaluate():

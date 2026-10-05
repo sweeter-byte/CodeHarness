@@ -1,4 +1,4 @@
-"""Prepare an isolated repository checkout for one SWE-bench instance."""
+"""Prepare host-side directories for one SWE-bench instance."""
 
 from __future__ import annotations
 
@@ -174,5 +174,41 @@ class SWEbenchWorkspaceManager:
             raise WorkspacePreparationError(
                 "SWE-bench checkout is not clean after checkout"
             )
+        agent_home.mkdir()
+        return PreparedSWEbenchWorkspace(case_root, workspace, agent_home)
+
+
+class SWEbenchRuntimeWorkspaceManager:
+    """Create host-only runtime state for a container-backed rollout."""
+
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        work_root: str | Path | None = None,
+    ) -> None:
+        self.run_id = run_id
+        self.work_root = (
+            Path(
+                work_root
+                if work_root is not None
+                else Path(tempfile.gettempdir()) / "codeharness-swebench"
+            )
+            .expanduser()
+            .resolve()
+        )
+
+    def prepare(self, instance: SWEbenchInstance) -> PreparedSWEbenchWorkspace:
+        instance_id = SWEbenchWorkspaceManager._safe_instance_id(
+            instance.instance_id
+        )
+        case_root = (self.work_root / self.run_id / instance_id).resolve()
+        workspace = case_root / "runtime-state"
+        agent_home = case_root / "agent-home"
+        if case_root.exists():
+            raise FileExistsError(
+                f"SWE-bench runtime workspace already exists: {case_root}"
+            )
+        workspace.mkdir(parents=True)
         agent_home.mkdir()
         return PreparedSWEbenchWorkspace(case_root, workspace, agent_home)

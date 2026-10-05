@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from evals.runner.runner import (
-    REPOSITORY_ROOT,
     RESULTS_ROOT,
     EvaluationConfigurationError,
     WorkerProcessResult,
@@ -25,7 +24,10 @@ from evals.runner.runner import (
     run_worker_process,
     write_json,
 )
-from evals.runner.verifier import capture_patch
+from evals.swebench.container_patch import (
+    ContainerPatchCollector,
+    ContainerPatchError,
+)
 from evals.swebench.dataset import (
     DEFAULT_DATASET_NAME,
     DEFAULT_SPLIT,
@@ -38,8 +40,12 @@ from evals.swebench.evaluate import (
     run_official_evaluation,
 )
 from evals.swebench.prediction import build_prediction, write_prediction
+from evals.swebench.rollout_container import (
+    RolloutContainerError,
+    SWEbenchRolloutContainer,
+)
 from evals.swebench.workspace import (
-    SWEbenchWorkspaceManager,
+    SWEbenchRuntimeWorkspaceManager,
     WorkspacePreparationError,
 )
 
@@ -68,6 +74,31 @@ def _build_config(
     }
 
 
+def _instance_metadata(instance: Any) -> dict[str, Any]:
+    """Return only public rollout inputs and reproducibility metadata."""
+    return {
+        "instance_id": instance.instance_id,
+        "repo": instance.repo,
+        "base_commit": instance.base_commit,
+        "problem_statement": instance.problem_statement,
+        "image": instance.raw.get("image"),
+    }
+
+
+def _rollout_metadata(info: Any) -> dict[str, str]:
+    """Serialize the non-hidden startup facts for one rollout container."""
+    return {
+        "image": info.image,
+        "image_id": info.image_id,
+        "container_name": info.container_name,
+        "container_id": info.container_id,
+        "initial_head": info.initial_head,
+        "initial_status": info.initial_status,
+        "python_path": info.python_path,
+        "python_version": info.python_version,
+    }
+
+
 def run_single_instance(
     *,
     instance_id: str,
@@ -81,6 +112,8 @@ def run_single_instance(
     run_id: str | None = None,
     dataset_loader: DatasetLoader | None = None,
     workspace_manager: Any | None = None,
+    rollout_container_factory: Callable[..., Any] = SWEbenchRolloutContainer,
+    patch_collector_factory: Callable[[str], Any] = ContainerPatchCollector,
     worker_process_runner: Callable[..., WorkerProcessResult] = run_worker_process,
     official_evaluator: Callable[..., dict[str, Any]] = run_official_evaluation,
 ) -> tuple[Path, dict[str, Any]]:
@@ -111,42 +144,56 @@ def run_single_instance(
         ),
         env,
     )
-    write_json(run_root / "instance.json", instance.raw, env)
+    write_json(run_root / "instance.json", _instance_metadata(instance), env)
 
-    manager = workspace_manager or SWEbenchWorkspaceManager(
+    manager = workspace_manager or SWEbenchRuntimeWorkspaceManager(
         resolved_run_id,
         work_root=work_root,
-        repository_root=REPOSITORY_ROOT,
     )
     prepared = manager.prepare(instance)
     worker_result_path = prepared.case_root / "worker-result.json"
-    command = [
-        sys.executable,
-        "-m",
-        "evals.swebench.worker",
-        "--problem-statement",
-        instance.problem_statement,
-        "--workspace",
-        str(prepared.workspace),
-        "--agent-home",
-        str(prepared.agent_home),
-        "--result",
-        str(worker_result_path),
-    ]
     child_env = _worker_environment(prepared.workspace, prepared.agent_home, env)
 
     started = time.monotonic()
-    process = worker_process_runner(
-        command,
-        workspace=prepared.workspace,
-        environment=child_env,
-        timeout_seconds=timeout_seconds,
-    )
-    _write_log(run_root / "agent.stdout.log", process.stdout, env)
-    _write_log(run_root / "agent.stderr.log", process.stderr, env)
-    worker_payload = _load_worker_payload(worker_result_path, process)
+    rollout = rollout_container_factory(instance, resolved_run_id)
+    collector = None
+    try:
+        info = rollout.start()
+        write_json(run_root / "rollout.json", _rollout_metadata(info), env)
+        collector = patch_collector_factory(info.container_id)
+        collector.snapshot_baseline()
+        command = [
+            sys.executable,
+            "-m",
+            "evals.swebench.worker",
+            "--problem-statement",
+            instance.problem_statement,
+            "--workspace",
+            str(prepared.workspace),
+            "--agent-home",
+            str(prepared.agent_home),
+            "--container-id",
+            info.container_id,
+            "--result",
+            str(worker_result_path),
+        ]
+        process = worker_process_runner(
+            command,
+            workspace=prepared.workspace,
+            environment=child_env,
+            timeout_seconds=timeout_seconds,
+        )
+        _write_log(run_root / "agent.stdout.log", process.stdout, env)
+        _write_log(run_root / "agent.stderr.log", process.stderr, env)
+        worker_payload = _load_worker_payload(worker_result_path, process)
+        patch, patch_error = collector.capture_patch()
+    finally:
+        try:
+            if collector is not None:
+                collector.close()
+        finally:
+            rollout.close()
 
-    patch, patch_error = capture_patch(prepared.workspace)
     safe_patch = _redact_text(patch, env)
     _write_log(run_root / "patch.diff", safe_patch, env)
     prediction = build_prediction(
@@ -220,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         EvaluationConfigurationError,
         SWEbenchDependencyError,
         OfficialEvaluationError,
+        ContainerPatchError,
+        RolloutContainerError,
         WorkspacePreparationError,
         FileExistsError,
         LookupError,
