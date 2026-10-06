@@ -215,6 +215,8 @@ class SWEbenchRolloutContainer:
                 "create",
                 "--name",
                 self.container_name,
+                "--network",
+                "none",
                 "--user",
                 _official_container_user(),
                 "--cap-add",

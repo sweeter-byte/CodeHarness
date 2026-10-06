@@ -72,6 +72,8 @@ Host-only runtime state and case-local agent state live under:
 
 The source of truth is `/testbed` in the official rollout container. The host
 runtime directory is only the worker process cwd and is not a repository clone.
+Agent rollout containers run without external network access. The official
+SWE-bench evaluator remains unchanged.
 
 The persistent artifacts live under:
 

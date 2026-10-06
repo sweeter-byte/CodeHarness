@@ -278,6 +278,8 @@ def test_create_and_start_match_official_container_runtime_semantics():
         "create",
         "--name",
         rollout.container_name,
+        "--network",
+        "none",
         "--user",
         "root",
         "--cap-add",
