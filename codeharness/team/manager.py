@@ -10,13 +10,18 @@ handshake — the thread is never killed.
 import threading
 import time
 
-from codeharness.tasks import TASKS, AGENT_NAMES
 from codeharness.background import BackgroundManager
-from codeharness.team.bus import BUS, LEADER
+from codeharness.skills import SkillRegistry
+from codeharness.tasks import AGENT_NAMES, TASKS
 from codeharness.team import protocol
+from codeharness.team.bus import BUS, LEADER
 from codeharness.team.teammate import (
-	TeammateState, TEAMMATE_MAX_ROUNDS, TEAMMATE_TOOLS,
-	teammate_system, make_teammate_handlers, teammate_main,
+	TEAMMATE_MAX_ROUNDS,
+	TEAMMATE_TOOLS,
+	TeammateState,
+	make_teammate_handlers,
+	teammate_main,
+	teammate_system,
 )
 
 
@@ -65,9 +70,19 @@ class TeamManager:
 	# ── lifecycle ──
 
 	def spawn(self, task_id: str, name: str | None = None,
-			  require_plan: bool = False) -> str:
+			  require_plan: bool = False, *,
+			  skill_registry: SkillRegistry,
+			  agent_factory=None,
+			  workspace_backend=None) -> str:
 		"""Claim the initial task, then start the teammate thread."""
-		if self._agent_factory is None:
+		if agent_factory is None:
+			chosen_agent_factory = self._agent_factory
+			chosen_workspace_backend = self._workspace_backend
+		else:
+			chosen_agent_factory = agent_factory
+			chosen_workspace_backend = workspace_backend
+
+		if chosen_agent_factory is None:
 			return "Error: agent factory is not configured; start CodeHarness first"
 
 		if name is not None:
@@ -98,6 +113,7 @@ class TeamManager:
 		state = TeammateState(name=name, require_plan=require_plan)
 		from codeharness.team.teammate import _bind_task
 		_bind_task(state, task, cwd)
+		assigned_cwd = state.assignment["cwd"]
 		state.messages.append({
 			"role": "user",
 			"content": (f"[Assigned task {task.id}] {task.subject}\n"
@@ -105,18 +121,20 @@ class TeamManager:
 		})
 
 		teammate_bg = BackgroundManager()
-		state.agent = self._agent_factory(
-			system=teammate_system(state),
+		state.agent = chosen_agent_factory(
+			system=teammate_system(state, skill_registry),
 			tools=list(TEAMMATE_TOOLS),
 			handlers=make_teammate_handlers(
 				state,
 				teammate_bg,
-				workspace_backend=self._workspace_backend,
+				skill_registry,
+				workspace_backend=chosen_workspace_backend,
 			),
 			max_rounds=TEAMMATE_MAX_ROUNDS,
 			todo_manager=state.todo,
 			memory_manager=False,          # leader owns cross-session memory
 			background_manager=teammate_bg,
+			skill_registry=skill_registry,
 			interactive=False,             # never prompt input() off-thread
 		)
 
@@ -129,7 +147,7 @@ class TeamManager:
 		state.thread.start()
 		print(f"\033[35m[team] spawned {name} on {task.id}\033[0m")
 		return (f"Spawned teammate {name} on task {task.id} "
-				f"(cwd: {state.assignment['cwd']}, "
+				f"(cwd: {assigned_cwd}, "
 				f"require_plan={require_plan})")
 
 	def shutdown(self, name: str) -> str:

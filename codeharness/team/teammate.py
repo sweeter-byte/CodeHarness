@@ -22,8 +22,8 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-from codeharness.core.prompt import SKILL_ROUTING_RULES
-from codeharness.skills.tools import SKILL_LOADER
+from codeharness.skills import SkillRegistry
+from codeharness.skills.prompt import SKILL_ROUTING_RULES
 from codeharness.tasks import TASK_HANDLERS, TASK_TOOLS, TASKS
 from codeharness.team import protocol
 from codeharness.team.bus import BUS, LEADER
@@ -35,7 +35,12 @@ from codeharness.team.protocol import (
 	GATE_REJECTED,
 	GATE_REQUIRED,
 )
-from codeharness.tools import TodoManager, WorkspaceBackend, build_base_registry
+from codeharness.tools import (
+	TodoManager,
+	WorkspaceBackend,
+	build_base_registry,
+	build_base_schemas,
+)
 
 IDLE_SCAN_INTERVAL = 2.0     # seconds between shared-task-board scans
 TEAMMATE_MAX_ROUNDS = 60
@@ -105,7 +110,7 @@ SUBMIT_PLAN_SCHEMA = {
 
 # The teammate schema snapshot preserves the legacy visible tool order.
 _base_schemas = [
-	schema for schema in build_base_registry().schemas
+	schema for schema in build_base_schemas()
 	if schema["function"]["name"] not in _EXCLUDED_NAMES
 ]
 _task_board_schemas = [
@@ -135,7 +140,7 @@ class TeammateState:
 # ── System prompt ─────────────────────────────────────────────
 
 
-def teammate_system(state: TeammateState) -> str:
+def teammate_system(state: TeammateState, skill_registry: SkillRegistry) -> str:
 	plan_rules = ""
 	if state.require_plan:
 		plan_rules = (
@@ -166,7 +171,7 @@ def teammate_system(state: TeammateState) -> str:
 		"teammate. Your final answer alone does NOT reach the leader; "
 		"complete_task + a clear summary does.\n"
 		f"{plan_rules}\n"
-		f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
+		f"Skills available:\n{skill_registry.catalog()}\n\n"
 		"Use load_skill to read the full instructions when a skill applies.\n"
 		f"{SKILL_ROUTING_RULES}"
 	)
@@ -178,6 +183,7 @@ def teammate_system(state: TeammateState) -> str:
 def make_teammate_handlers(
 	state: TeammateState,
 	background_manager,
+	skill_registry: SkillRegistry,
 	workspace_backend: WorkspaceBackend | None = None,
 ) -> dict:
 	"""Build the teammate's handler map from the base handlers.
@@ -193,6 +199,7 @@ def make_teammate_handlers(
 		todo_manager=state.todo,
 		background_manager=background_manager,
 		workspace_backend=workspace_backend,
+		skill_registry=skill_registry,
 	)
 	handlers = {
 		name: handler for name, handler in base_registry.handlers.items()
@@ -226,7 +233,7 @@ def make_teammate_handlers(
 		if name in handlers:
 			handlers[name] = _guard(name, handlers[name])
 
-	def _claim(task_id: str, owner: str = None) -> str:
+	def _claim(task_id: str, owner: str | None = None) -> str:
 		task, cwd, error = TASKS.claim(
 			task_id, state.name, worktree_resolver=resolve_worktree_cwd)
 		if error:
@@ -234,7 +241,7 @@ def make_teammate_handlers(
 		_bind_task(state, task, cwd)
 		return f"Claimed {task.id} ({task.subject})"
 
-	def _complete(task_id: str, owner: str = None) -> str:
+	def _complete(task_id: str, owner: str | None = None) -> str:
 		# Assignment is NOT cleared here: later tools in this round may
 		# still need the working directory. Unbinding happens at round end.
 		return TASK_HANDLERS["complete_task"](task_id, owner=state.name)

@@ -106,11 +106,6 @@ def _install_close_spies(monkeypatch, app_module, harness, team_results=(True,))
         lambda timeout: next(team_results),
     )
     monkeypatch.setattr(
-        app_module,
-        "configure_subagent_agent_factory",
-        lambda factory: teardown.append(("subagent", factory)),
-    )
-    monkeypatch.setattr(
         app_module.TEAM,
         "set_agent_factory",
         lambda factory: teardown.append(("team", factory)),
@@ -164,7 +159,6 @@ def test_close_times_out_on_active_user_turn_then_retries(monkeypatch, tmp_path)
     assert harness._closed is True
     assert harness._started is False
     assert teardown == [
-        ("subagent", None),
         ("team", None),
         "mcp_permissions",
         "mcp_manager",

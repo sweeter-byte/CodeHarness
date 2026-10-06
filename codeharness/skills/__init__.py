@@ -1,9 +1,5 @@
-"""Python Skill Runtime (loader only).
+"""Runtime-owned skill discovery."""
 
-The actual SKILL.md files stay in the repository-root ``skills/`` directory;
-this package only hosts the runtime code that scans and loads them.
-"""
+from .registry import Skill, SkillRegistry, SkillScope
 
-from .loader import SkillLoader
-
-__all__ = ["SkillLoader"]
+__all__ = ["Skill", "SkillRegistry", "SkillScope"]

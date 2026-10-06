@@ -9,8 +9,11 @@ different agents can never mutate each other's tool set through a shared
 list/dict.
 """
 
+import copy
+
 from codeharness.context.tools import CONTEXT_HANDLERS, CONTEXT_TOOLS
-from codeharness.skills.tools import SKILL_HANDLERS, SKILL_TOOLS
+from codeharness.skills.registry import SkillRegistry
+from codeharness.skills.tools import SKILL_TOOLS, make_skill_handlers
 from codeharness.tools.coding import CODING_TOOLS, make_coding_handlers
 from codeharness.tools.registry import ToolRegistry
 from codeharness.tools.todo import TODO_TOOLS, TodoManager, make_todo_handler
@@ -22,6 +25,8 @@ def build_base_registry(
     background_manager=None,
     workspace: str | None = None,
     workspace_backend: WorkspaceBackend | None = None,
+    *,
+    skill_registry: SkillRegistry,
 ) -> ToolRegistry:
     """Assemble a fresh registry with the base tool set.
 
@@ -49,7 +54,22 @@ def build_base_registry(
         ),
     )
     registry.extend(TODO_TOOLS, {"todo_write": make_todo_handler(todo_manager)})
-    registry.extend(SKILL_TOOLS, SKILL_HANDLERS)
+    registry.extend(SKILL_TOOLS, make_skill_handlers(skill_registry))
     registry.extend(CONTEXT_TOOLS, CONTEXT_HANDLERS)
     registry.extend(CRON_TOOLS, CRON_HANDLERS)
     return registry
+
+
+def build_base_schemas() -> list[dict]:
+    """Return a fresh list of base tool schemas in canonical order."""
+    from codeharness.scheduler.cron import CRON_TOOLS
+
+    return copy.deepcopy(
+        [
+            *CODING_TOOLS,
+            *TODO_TOOLS,
+            *SKILL_TOOLS,
+            *CONTEXT_TOOLS,
+            *CRON_TOOLS,
+        ]
+    )

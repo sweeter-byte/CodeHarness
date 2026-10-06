@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from codeharness.skills import SkillRegistry
 from codeharness.team.protocol import GATE_APPROVED, GATE_REQUIRED
 from codeharness.team.teammate import TeammateState, make_teammate_handlers
 
@@ -11,10 +14,17 @@ class RecordingBackgroundManager:
         return "bg_001", None
 
 
-def test_background_bash_is_blocked_without_assignment():
+def _skills(tmp_path: Path) -> SkillRegistry:
+    return SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
+
+
+def test_background_bash_is_blocked_without_assignment(tmp_path):
     state = TeammateState(name="Alice", require_plan=False)
     background = RecordingBackgroundManager()
-    handler = make_teammate_handlers(state, background)["bash"]
+    handler = make_teammate_handlers(state, background, _skills(tmp_path))["bash"]
 
     result = handler(command="pwd", run_in_background=True)
 
@@ -27,7 +37,7 @@ def test_background_bash_is_blocked_until_plan_is_approved(tmp_path):
     state.assignment = {"task_id": "task_1", "cwd": str(tmp_path)}
     state.plan_gate = GATE_REQUIRED
     background = RecordingBackgroundManager()
-    handler = make_teammate_handlers(state, background)["bash"]
+    handler = make_teammate_handlers(state, background, _skills(tmp_path))["bash"]
 
     blocked = handler(command="pwd", run_in_background=True)
 
@@ -49,7 +59,7 @@ def test_background_bash_uses_current_assignment_cwd(tmp_path):
     state = TeammateState(name="Alice", require_plan=False)
     state.assignment = {"task_id": "task_a", "cwd": str(first)}
     background = RecordingBackgroundManager()
-    handler = make_teammate_handlers(state, background)["bash"]
+    handler = make_teammate_handlers(state, background, _skills(tmp_path))["bash"]
 
     handler(command="pwd", run_in_background=True)
     state.assignment = {"task_id": "task_b", "cwd": str(second)}

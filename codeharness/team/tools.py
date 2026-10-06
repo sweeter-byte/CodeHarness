@@ -1,23 +1,18 @@
 """Leader-side team tools: lifecycle, worktree management, messaging, approval.
 
 Schema + handler pairs follow the codeharness/tasks/tools.py convention; CodeHarness Runtime's
-__main__ registers TEAM_TOOLS / TEAM_HANDLERS into the leader's
+__main__ registers TEAM_TOOLS with a runtime-bound handler map into the leader's
 ToolRegistry. Teammates never see these — their tool set is built from the
 base tool registry in teammate.py.
 """
 
-from codeharness.team.bus import BUS, LEADER
+from codeharness.skills import SkillRegistry
 from codeharness.team import protocol
+from codeharness.team.bus import BUS, LEADER
 from codeharness.team.manager import TEAM
 from codeharness.team.worktree import create_worktree, remove_worktree
 
-
 # ── Handlers ──────────────────────────────────────────────────
-
-
-def run_spawn_teammate(task_id: str, name: str = None,
-					   require_plan: bool = False) -> str:
-	return TEAM.spawn(task_id, name=name, require_plan=require_plan)
 
 
 def run_shutdown_teammate(name: str) -> str:
@@ -168,12 +163,32 @@ TEAM_TOOLS = [
 	),
 ]
 
-TEAM_HANDLERS = {
-	"spawn_teammate":    run_spawn_teammate,
-	"shutdown_teammate": run_shutdown_teammate,
-	"list_teammates":    run_list_teammates,
-	"create_worktree":   run_create_worktree,
-	"remove_worktree":   run_remove_worktree,
-	"send_message":      run_send_message,
-	"approve_plan":      run_approve_plan,
-}
+def make_team_handlers(
+	skill_registry: SkillRegistry,
+	*,
+	agent_factory=None,
+	workspace_backend=None,
+	team_manager=TEAM,
+) -> dict:
+	"""Bind team spawning to one Runtime's skills and agent dependencies."""
+
+	def spawn_teammate(task_id: str, name: str | None = None,
+					   require_plan: bool = False) -> str:
+		return team_manager.spawn(
+			task_id,
+			name=name,
+			require_plan=require_plan,
+			skill_registry=skill_registry,
+			agent_factory=agent_factory,
+			workspace_backend=workspace_backend,
+		)
+
+	return {
+		"spawn_teammate": spawn_teammate,
+		"shutdown_teammate": run_shutdown_teammate,
+		"list_teammates": run_list_teammates,
+		"create_worktree": run_create_worktree,
+		"remove_worktree": run_remove_worktree,
+		"send_message": run_send_message,
+		"approve_plan": run_approve_plan,
+	}

@@ -9,21 +9,25 @@ Package layout (single-direction dependencies):
                 from the leader's pool)
   manager.py    TeamManager registry + spawn/shutdown orchestration
   wakeup.py     leader wakeup thread (event-driven [Team events] delivery)
-  tools.py      leader tool schemas + handlers (TEAM_TOOLS / TEAM_HANDLERS)
+  tools.py      leader tool schemas + runtime-bound handler factory
 """
 
+from codeharness.team import wakeup
 from codeharness.team.bus import BUS, LEADER
+from codeharness.team.manager import TEAM, TeamManager
 from codeharness.team.protocol import ProtocolState
 from codeharness.team.teammate import TEAMMATE_TOOLS, TeammateState
-from codeharness.team.manager import TEAM, TeamManager
-from codeharness.team.tools import TEAM_TOOLS, TEAM_HANDLERS
-from codeharness.team import wakeup
+from codeharness.team.tools import TEAM_TOOLS, make_team_handlers
 
 __all__ = [
-	"BUS", "LEADER",
+	"BUS",
+	"LEADER",
+	"TEAM",
+	"TEAMMATE_TOOLS",
+	"TEAM_TOOLS",
 	"ProtocolState",
-	"TEAMMATE_TOOLS", "TeammateState",
-	"TEAM", "TeamManager",
-	"TEAM_TOOLS", "TEAM_HANDLERS",
+	"TeamManager",
+	"TeammateState",
+	"make_team_handlers",
 	"wakeup",
 ]

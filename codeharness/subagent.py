@@ -1,21 +1,18 @@
-import os
-
-from codeharness.core.prompt import SKILL_ROUTING_RULES
-from codeharness.skills.tools import SKILL_LOADER
-from codeharness.tools import TodoManager, build_base_registry
+from codeharness.skills import SkillRegistry
+from codeharness.skills.prompt import SKILL_ROUTING_RULES
+from codeharness.tools import TodoManager, build_base_schemas
 
 
-def build_sub_system(workspace: str | None) -> str:
-    effective_workspace = workspace or os.getcwd()
+def build_sub_system(workspace: str, skill_registry: SkillRegistry) -> str:
     return (
-        f"You are a subagent at {effective_workspace}, delegated a specific subtask "
+        f"You are a subagent at {workspace}, delegated a specific subtask "
         "by a parent agent. Use tools to complete it. Act, don't explain.\n"
         "If the subtask is complex and multi-step, you MAY call todo_write to track "
         "your own plan; skip it for simple tasks.\n"
         "Your intermediate messages are DISCARDED — the parent sees ONLY your final "
         "text. So your last message must be a complete, self-contained summary of "
         "the result (findings, file changes, or why you failed).\n\n"
-        f"Skills available:\n{SKILL_LOADER.catalog()}\n\n"
+        f"Skills available:\n{skill_registry.catalog()}\n\n"
         "Use load_skill to read the full instructions when a skill applies.\n"
         f"{SKILL_ROUTING_RULES}"
     )
@@ -24,23 +21,12 @@ def build_sub_system(workspace: str | None) -> str:
 SUB_MAX_ROUNDS = 30
 
 
-_agent_factory = None
-_workspace = None
-
-
-def configure_agent_factory(factory, workspace: str | None = None) -> None:
-    """Configure the Runtime-owned factory and workspace for one-shot agents."""
-    global _agent_factory, _workspace
-    _agent_factory = factory
-    _workspace = workspace
-
-
 # The subagent tool set is exactly the base tool set, built explicitly from
-# its own registry — never a filtered view of the leader's pool. 'task'
+# the canonical schemas — never a filtered view of the leader's pool. 'task'
 # (second-level delegation), task system tools, team tools and MCP tools are
 # Leader-only by construction: they are registered by the leader Runtime
 # registry, not in the base registry.
-SUB_TOOLS = build_base_registry().schemas
+SUB_TOOLS = build_base_schemas()
 
 TASK_TOOL = {
     "type": "function",
@@ -66,30 +52,32 @@ TASK_TOOL = {
 }
 
 
-def run_task(prompt: str) -> str:
-    """Run a nested agent loop in a fresh context; return its final text."""
-    from codeharness.background import BackgroundManager
+def make_task_handler(
+    factory,
+    *,
+    workspace: str,
+    skill_registry: SkillRegistry,
+):
+    """Bind one Runtime's factory, workspace, and skills to the task tool."""
 
-    if _agent_factory is None:
-        raise RuntimeError(
-            "SubAgent agent factory is not configured; start CodeHarness first"
+    def run_task(prompt: str) -> str:
+        """Run a nested agent loop in a fresh context; return its final text."""
+        from codeharness.background import BackgroundManager
+
+        print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
+        sub_todo = TodoManager()
+        sub_bg = BackgroundManager()
+        sub = factory(
+            system=build_sub_system(workspace, skill_registry),
+            max_rounds=SUB_MAX_ROUNDS,
+            todo_manager=sub_todo,
+            background_manager=sub_bg,
+            skill_registry=skill_registry,
+            interactive=True,
         )
+        messages = [{"role": "user", "content": prompt}]
+        result = sub.agent_loop(messages) or "(no summary)"
+        print(f"\033[35m[subagent] done ({len(result)} chars)\033[0m")
+        return result
 
-    print(f"\033[35m[subagent] starting: {prompt[:100]}\033[0m")
-    sub_todo = TodoManager()              # per-subagent TODO, discarded with the sub-loop
-    sub_bg = BackgroundManager()          # per-subagent background tasks
-
-    sub = _agent_factory(
-        system=build_sub_system(_workspace),
-        max_rounds=SUB_MAX_ROUNDS,
-        todo_manager=sub_todo,
-        background_manager=sub_bg,
-        interactive=True,
-    )
-    messages = [{"role": "user", "content": prompt}]
-    result = sub.agent_loop(messages) or "(no summary)"
-    print(f"\033[35m[subagent] done ({len(result)} chars)\033[0m")
-    return result
-
-
-TASK_HANDLERS = {"task": run_task}
+    return run_task

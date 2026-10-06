@@ -2,23 +2,20 @@
 
 from pathlib import Path
 
-from codeharness.skills.tools import SKILL_LOADER
+from codeharness.skills import SkillRegistry
+from codeharness.skills.prompt import SKILL_ROUTING_RULES
 
 TODO_TOOL_NAME = "todo_write"
-SKILL_ROUTING_RULES = (
-    "When a skill clearly matches the task, load it before taking task-specific "
-    "actions.\nFor bug fixes and regressions, load the bug-fix skill before "
-    "editing code."
-)
 
 
 def build_default_system_prompt(
     workspace: str | Path,
-    skill_catalog: str | None = None,
+    *,
+    skill_registry: SkillRegistry,
     workflow_catalog: str = "(no workflows available)",
 ) -> str:
     """Build the default prompt with the current workflow and skill catalogs."""
-    catalog = SKILL_LOADER.catalog() if skill_catalog is None else skill_catalog
+    catalog = skill_registry.catalog()
     return (
         f"You are a coding agent at {workspace}. Use tools to solve tasks. Act, don't explain.\n"
         f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "

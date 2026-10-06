@@ -346,8 +346,8 @@ def test_permission_hook_blocks_background_approval_without_cron_dependency(
 def test_background_turn_subagent_inherits_non_interactive_approval_context(
     monkeypatch, tmp_path
 ):
-    from codeharness import hooks
-    from codeharness import subagent
+    from codeharness import hooks, subagent
+    from codeharness.skills import SkillRegistry
 
     monkeypatch.setattr(
         hooks._perm_manager,
@@ -365,12 +365,20 @@ def test_background_turn_subagent_inherits_non_interactive_approval_context(
             blocked.append(result)
             return "nested done"
 
-    subagent.configure_agent_factory(lambda **_kwargs: NestedAgent())
+    skills = SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
+    task_handler = subagent.make_task_handler(
+        lambda **_kwargs: NestedAgent(),
+        workspace=str(tmp_path),
+        skill_registry=skills,
+    )
     harness = _runtime(tmp_path)
 
     class LeaderAgent:
         def agent_loop(self, _history):
-            return subagent.run_task("nested task")
+            return task_handler("nested task")
 
     harness.agent = LeaderAgent()
 
@@ -519,9 +527,9 @@ def test_team_wakeup_clears_buffer_after_presentation_failure(monkeypatch, tmp_p
 
 
 def test_backend_files_do_not_contain_cli_prompt():
-    from codeharness.scheduler import cron
     from codeharness import app as app_module
     from codeharness.core import agent as agent_module
+    from codeharness.scheduler import cron
     from codeharness.team import wakeup
 
     for module in (cron, wakeup, app_module, agent_module):

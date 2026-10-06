@@ -1,16 +1,8 @@
-"""Skill tool adapter — exposes the skill catalog to the model via load_skill.
+"""Skill tool schema and runtime-bound handler factory."""
 
-The SkillLoader runtime stays in loader.py; this module only owns the tool
-schema + handler pair. The module-level singleton preserves the legacy
-behaviour (one shared catalog for leader, subagents and teammates); the
-skill runtime is NOT redesigned in Phase 2.
-"""
+from collections.abc import Callable
 
-from codeharness.skills.loader import SkillLoader
-
-# ── Skill Loader (module-level singleton) ─────────────────────
-SKILL_LOADER = SkillLoader()
-SKILL_LOADER.scan()
+from codeharness.skills.registry import SkillRegistry
 
 # ── Tool Schema ───────────────────────────────────────────────
 
@@ -37,13 +29,9 @@ SKILL_TOOLS = [
     },
 ]
 
-# ── Tool Implementation ───────────────────────────────────────
 
-
-def run_load_skill(name: str) -> str:
-    return SKILL_LOADER.load(name)
-
-
-SKILL_HANDLERS = {
-    "load_skill": run_load_skill,
-}
+def make_skill_handlers(
+    skill_registry: SkillRegistry,
+) -> dict[str, Callable[..., str]]:
+    """Bind load_skill to one explicit runtime-owned skill registry."""
+    return {"load_skill": skill_registry.load}

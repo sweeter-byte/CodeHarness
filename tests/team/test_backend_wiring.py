@@ -41,8 +41,9 @@ class FakeThread:
 
 
 def test_team_manager_propagates_backend_and_assignment_cwd(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
+    from codeharness.skills import SkillRegistry
     from codeharness.team import manager as manager_module
     from codeharness.tools import coding
 
@@ -71,6 +72,10 @@ def test_team_manager_propagates_backend_and_assignment_cwd(
         lambda **kwargs: created.append(kwargs) or SimpleNamespace(),
         workspace_backend=backend,
     )
+    skills = SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
     monkeypatch.setattr(
         manager_module.TASKS,
         "claim",
@@ -82,9 +87,10 @@ def test_team_manager_propagates_backend_and_assignment_cwd(
     )
     monkeypatch.setattr(manager_module.threading, "Thread", FakeThread)
 
-    result = manager.spawn(task.id, name="Alice")
+    result = manager.spawn(task.id, name="Alice", skill_registry=skills)
 
     assert result.startswith("Spawned teammate Alice")
+    assert created[0]["skill_registry"] is skills
     handlers = created[0]["handlers"]
     assert handlers["read_file"](path="x.py") == "backend read"
     assert handlers["bash"](command="pytest -q") == "backend bash"

@@ -8,23 +8,31 @@ permissions, and full cleanup on close() (including after a partial start).
 No test here calls a real LLM API.
 """
 
-import threading
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
-
 
 # ── helpers ────────────────────────────────────────────────────
 
 
 def _bare_agent(agent_module, **kwargs):
     """Construct a real Agent without touching the network."""
+    from codeharness.skills import SkillRegistry
+
+    with TemporaryDirectory(prefix="codeharness-runtime-state-test-") as directory:
+        root = Path(directory)
+        skill_registry = SkillRegistry(
+            workspace=root,
+            agent_home=root / "agent-home",
+        )
     defaults = {
         "client": object(),
         "model": "test-model",
         "model_context_window": 4096,
         "memory_manager": False,
+        "skill_registry": skill_registry,
     }
     defaults.update(kwargs)
     return agent_module.Agent(**defaults)
@@ -198,9 +206,9 @@ def test_agent_default_registry_uses_injected_workspace_backend():
 
 
 def test_no_process_global_todo_or_background_default_exists():
-    import codeharness.tools.todo as todo_module
     import codeharness.background as background_pkg
     import codeharness.background.manager as background_module
+    import codeharness.tools.todo as todo_module
 
     assert not hasattr(todo_module, "TODO")
     assert not hasattr(todo_module, "TODO_HANDLERS")
@@ -316,6 +324,76 @@ def test_runtime_leader_agent_shares_todo_manager_with_registry(monkeypatch, tmp
     assert harness.todo_manager.items == [
         {"content": "leader step", "status": "pending"}
     ]
+
+
+def test_runtime_start_binds_leader_subagent_and_team_to_one_skill_registry(
+    monkeypatch, tmp_path
+):
+    from codeharness import app as app_module
+
+    manifest = tmp_path / ".codeharness/skills/bug-fix/SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: bug-fix\ndescription: Runtime project override\n---\n"
+        "runtime project body\n",
+        encoding="utf-8",
+    )
+    captured = {}
+    real_make_task_handler = app_module.make_task_handler
+    real_make_team_handlers = app_module.make_team_handlers
+
+    def make_task_handler(factory, *, workspace, skill_registry):
+        captured["task"] = (factory, workspace, skill_registry)
+        handler = real_make_task_handler(
+            factory,
+            workspace=workspace,
+            skill_registry=skill_registry,
+        )
+        captured["task_handler"] = handler
+        return handler
+
+    def make_team_handlers(
+        skill_registry,
+        *,
+        agent_factory=None,
+        workspace_backend=None,
+    ):
+        captured["team_registry"] = skill_registry
+        captured["team_factory"] = agent_factory
+        captured["team_backend"] = workspace_backend
+        handlers = real_make_team_handlers(
+            skill_registry,
+            agent_factory=agent_factory,
+            workspace_backend=workspace_backend,
+        )
+        captured["team_handlers"] = handlers
+        return handlers
+
+    monkeypatch.setattr(app_module, "make_task_handler", make_task_handler)
+    monkeypatch.setattr(app_module, "make_team_handlers", make_team_handlers)
+
+    harness = _started_runtime(monkeypatch, tmp_path)
+
+    assert captured["task"] == (
+        harness.create_agent,
+        harness.tool_workspace,
+        harness.skill_registry,
+    )
+    assert captured["team_registry"] is harness.skill_registry
+    assert captured["team_factory"] == harness.create_agent
+    assert captured["team_backend"] is harness.workspace_backend
+    assert harness.registry.handlers["task"] is captured["task_handler"]
+    assert (
+        harness.registry.handlers["spawn_teammate"]
+        is captured["team_handlers"]["spawn_teammate"]
+    )
+    assert harness.skill_registry.catalog() in harness.agent.system
+    assert harness.registry.handlers["load_skill"]("bug-fix") == (
+        harness.skill_registry.load("bug-fix")
+    )
+    assert "runtime project body" in harness.registry.handlers["load_skill"](
+        "bug-fix"
+    )
 
 
 def test_runtime_leader_coding_tools_use_configured_workspace(monkeypatch, tmp_path):
@@ -552,20 +630,17 @@ def test_close_clears_mcp_permission_resolver(monkeypatch, tmp_path):
     assert hooks._perm_manager._mcp_annotations_of is None
 
 
-# ── 12,13,14: close clears factories and callbacks ────────────
+# ── 12,13,14: close clears factory and callbacks ──────────────
 
 
-def test_close_clears_subagent_and_team_factory(monkeypatch, tmp_path):
-    from codeharness import subagent
+def test_close_clears_team_factory(monkeypatch, tmp_path):
     from codeharness.team import TEAM
 
     harness = _started_runtime(monkeypatch, tmp_path)
-    assert subagent._agent_factory is not None
     assert TEAM._agent_factory is not None
 
     harness.close()
 
-    assert subagent._agent_factory is None
     assert TEAM._agent_factory is None
 
 
@@ -632,7 +707,6 @@ def test_team_wakeup_stop_releases_thread_and_status(monkeypatch, tmp_path):
 
 def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
     from codeharness import app as app_module
-    from codeharness import subagent
     from codeharness.config import RuntimeConfig
     from codeharness.team import TEAM
 
@@ -673,8 +747,7 @@ def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         harness.start()
 
-    # start() got as far as configuring factories + cron before failing.
-    assert subagent._agent_factory is not None
+    # start() got as far as configuring the Team factory + cron before failing.
     assert TEAM._agent_factory is not None
 
     harness.close()  # must not raise
@@ -682,7 +755,6 @@ def test_close_is_safe_after_partial_start_failure(monkeypatch, tmp_path):
     assert harness._closed is True
     assert cron_stopped == [True]
     assert wakeup_stopped == [True]
-    assert subagent._agent_factory is None
     assert TEAM._agent_factory is None
 
 

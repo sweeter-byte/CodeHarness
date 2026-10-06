@@ -59,10 +59,12 @@ SCRIPT = []          # callables(fake_agent, messages) -> str, FIFO across teamm
 class FakeAgent:
 	def __init__(self, system=None, tools=None, handlers=None,
 				 max_rounds=None, todo_manager=None, memory_manager=None,
-				 background_manager=None, interactive=True):
+				 background_manager=None, interactive=True,
+				 skill_registry=None):
 		self.system = system
 		self.tools = tools
 		self.handlers = handlers
+		self.skill_registry = skill_registry
 		self.interactive = interactive
 		assert memory_manager is False, "teammate memory must be disabled"
 		assert interactive is False, "teammate must be non-interactive"
@@ -93,15 +95,22 @@ def wait_for(predicate, timeout=10.0, what="condition"):
 
 def main():
 	import codeharness.team  # noqa: F401  (registers everything)
-	from codeharness.team import TEAM, BUS, LEADER
+	from codeharness.skills import SkillRegistry
 	from codeharness.tasks import TASKS
-	from codeharness.team.worktree import configure_worktrees
+	from codeharness.team import BUS, LEADER, TEAM
 	from codeharness.team import tools as team_tools
+	from codeharness.team.worktree import configure_worktrees
 
 	TASKS.set_directory(Path(TMP) / ".codeharness/state/tasks")
 	BUS.configure(Path(TMP) / ".codeharness/runtime/team/mailboxes")
 	configure_worktrees(Path(TMP), Path(TMP) / ".codeharness/worktrees")
 	TEAM.set_agent_factory(FakeAgent)
+	skills = SkillRegistry(
+		workspace=Path(TMP),
+		agent_home=Path(TMP) / "agent-home",
+	)
+	team_handlers = team_tools.make_team_handlers(skills)
+	spawn_teammate = team_handlers["spawn_teammate"]
 
 	# Buffer for inbox messages not matching the waited type yet.
 	pending: list[dict] = []
@@ -136,7 +145,7 @@ def main():
 		SCRIPT.append(work_one)  # BEFORE spawn: the thread starts immediately
 
 		t1 = TASKS.create("task one", "first job")
-		result = team_tools.run_spawn_teammate(t1.id, name="Alice")
+		result = spawn_teammate(t1.id, name="Alice")
 		assert "Spawned teammate Alice" in result, result
 		state = TEAM.get_state("Alice")
 		assert state.assignment["task_id"] == t1.id
@@ -146,7 +155,7 @@ def main():
 		print("1. spawn claim-before-start OK")
 
 		# spawn on an already-claimed task must fail and spawn nothing
-		result = team_tools.run_spawn_teammate(t1.id, name="Bob")
+		result = spawn_teammate(t1.id, name="Bob")
 		assert result.startswith("Error:"), result
 		assert TEAM.get_state("Bob") is None
 		print("   spawn-on-claimed-task refused OK")
@@ -164,7 +173,7 @@ def main():
 		# ── 3. auto-complete fallback ────────────────────────────
 		SCRIPT.append(lambda agent, messages: "finished but forgot complete_task")
 		t1b = TASKS.create("task one-b", "forgot to complete")
-		team_tools.run_spawn_teammate(t1b.id, name="Carol")
+		spawn_teammate(t1b.id, name="Carol")
 		result_msg = wait_msg("result")
 		assert "auto-completed" in result_msg["content"], result_msg["content"]
 		wait_msg("idle_notification")
@@ -209,7 +218,7 @@ def main():
 
 		SCRIPT.append(try_bash_and_submit)
 		t3 = TASKS.create("task three", "risky refactor")
-		team_tools.run_spawn_teammate(t3.id, name="Bob", require_plan=True)
+		spawn_teammate(t3.id, name="Bob", require_plan=True)
 		bob = TEAM.get_state("Bob")
 		# (gate == required is proven inside try_bash_and_submit: the bash
 		# call returns 'Blocked: plan status is required')
@@ -248,11 +257,11 @@ def main():
 
 		SCRIPT.append(boom)
 		t4 = TASKS.create("task four", "will crash")
-		team_tools.run_spawn_teammate(t4.id, name="Dave")
+		spawn_teammate(t4.id, name="Dave")
 		crash_msg = wait_msg("message")
 		assert crash_msg["from"] == "Dave"
 		assert "crashed: simulated crash mid-task" in crash_msg["content"]
-		assert f"released back to pending" in crash_msg["content"], crash_msg["content"]
+		assert "released back to pending" in crash_msg["content"], crash_msg["content"]
 		task = TASKS.load(t4.id)
 		assert task.status == "pending" and task.owner is None, (task.status, task.owner)
 		wait_for(lambda: TEAM.get_state("Dave") is None, what="Dave exit")

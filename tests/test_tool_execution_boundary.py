@@ -7,6 +7,7 @@ import pytest
 
 from codeharness import hooks
 from codeharness.security.permission import MCP_HOST_POLICY, PermissionManager
+from codeharness.skills import SkillRegistry
 from codeharness.tools import ToolRegistry, build_base_registry
 from codeharness.tools.executor import ToolExecutor
 from codeharness.workflow.definition import AgentStep, ToolStep, WorkflowConfig
@@ -54,6 +55,13 @@ def _tool_step(tool_name, args):
         tool_name=tool_name,
         args_template=args,
         output_key="result",
+    )
+
+
+def _skill_registry(tmp_path: Path) -> SkillRegistry:
+    return SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
     )
 
 
@@ -282,7 +290,10 @@ def test_workflow_safe_read_uses_workspace_bound_native_handler(
         "_perm_manager",
         PermissionManager(allowed_dirs=[str(workspace)], base_dir=workspace),
     )
-    registry = build_base_registry(workspace=str(workspace))
+    registry = build_base_registry(
+        skill_registry=_skill_registry(workspace),
+        workspace=str(workspace),
+    )
     runtime = WorkflowRuntime(
         registry=WorkflowDefinitionRegistry(),
         state_store=_RecordingStateStore(),
@@ -301,7 +312,9 @@ def test_workflow_safe_read_uses_workspace_bound_native_handler(
     assert result == {"output": "    1\tworkspace contents"}
 
 
-def test_base_registry_accepts_workspace_backend_without_changing_tool_schema():
+def test_base_registry_accepts_workspace_backend_without_changing_tool_schema(
+    tmp_path,
+):
     class Backend:
         def bash(self, command, run_in_background=False, cwd=None):
             return "bash"
@@ -321,8 +334,15 @@ def test_base_registry_accepts_workspace_backend_without_changing_tool_schema():
         def grep(self, pattern, path=".", file_pattern=None, cwd=None):
             return "grep"
 
-    default_names = [schema["function"]["name"] for schema in build_base_registry().schemas]
-    registry = build_base_registry(workspace_backend=Backend())
+    skills = _skill_registry(tmp_path)
+    default_names = [
+        schema["function"]["name"]
+        for schema in build_base_registry(skill_registry=skills).schemas
+    ]
+    registry = build_base_registry(
+        skill_registry=skills,
+        workspace_backend=Backend(),
+    )
 
     assert [schema["function"]["name"] for schema in registry.schemas] == default_names
     assert registry.get("read_file")(path="requests/utils.py") == (

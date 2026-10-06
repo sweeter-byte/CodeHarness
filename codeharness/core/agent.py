@@ -3,20 +3,22 @@ import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from openai import OpenAI
-from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
-from codeharness import hooks
-from codeharness.hooks import new_session_stats, trigger_hooks
-from codeharness.tools.executor import ToolExecutor
-from codeharness.context.budget import ContextBudget
-from codeharness.context.token_counter import TokenCounter
-from codeharness.context.manager import ContextManager
-from codeharness.memory import MemoryManager
-from codeharness.background import BackgroundManager
-from codeharness.core.prompt import build_default_system_prompt
-from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
-from codeharness.goal import GoalController, StopDecision
 
+from openai import OpenAI
+
+from codeharness import hooks  # noqa: F401 - compatibility module export
+from codeharness.background import BackgroundManager
+from codeharness.config import DEFAULT_MODEL_CONTEXT_WINDOW
+from codeharness.context.budget import ContextBudget
+from codeharness.context.manager import ContextManager
+from codeharness.context.token_counter import TokenCounter
+from codeharness.core.prompt import build_default_system_prompt
+from codeharness.goal import GoalController, StopDecision
+from codeharness.hooks import new_session_stats, trigger_hooks
+from codeharness.memory import MemoryManager
+from codeharness.skills import SkillRegistry
+from codeharness.tools import TodoManager, WorkspaceBackend, build_base_registry
+from codeharness.tools.executor import ToolExecutor
 
 MAX_CONSECUTIVE_REJECTIONS = 3
 TODO_TOOL_NAME = "todo_write"
@@ -42,7 +44,11 @@ class Agent:
                  approval_handler: Callable[[str], bool] | None = None,
                  status_handler: Callable[[str], None] | None = None,
                  goal_controller: GoalController = None,
-                 workflow_catalog: str = "(no workflows available)"):
+                 workflow_catalog: str = "(no workflows available)",
+                 skill_registry: SkillRegistry | None = None):
+        if skill_registry is None:
+            raise ValueError("skill_registry is required")
+        self.skill_registry = skill_registry
         self.client = client if client is not None else OpenAI(
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ["DEEPSEEK_BASE_URL"],
@@ -75,6 +81,7 @@ class Agent:
         self.workspace = workspace
         base_system = system or build_default_system_prompt(
             self.workspace or os.getcwd(),
+            skill_registry=self.skill_registry,
             workflow_catalog=workflow_catalog,
         )
 
@@ -106,6 +113,7 @@ class Agent:
                 background_manager=self.background_manager,
                 workspace=self.workspace,
                 workspace_backend=workspace_backend,
+                skill_registry=self.skill_registry,
             )
             self.tools = tools if tools is not None else registry.schemas
             self.handlers = handlers if handlers is not None else registry.handlers

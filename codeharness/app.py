@@ -7,28 +7,43 @@ from pathlib import Path
 from openai import OpenAI
 
 from codeharness import hooks
-from codeharness.hooks import new_session_stats, trigger_hooks
-from codeharness.scheduler import cron
-from codeharness.subagent import (
-    TASK_HANDLERS as SUB_TASK_HANDLERS,
-    TASK_TOOL,
-    configure_agent_factory as configure_subagent_agent_factory,
-)
+from codeharness.background import BackgroundManager
+from codeharness.config import RuntimeConfig
 from codeharness.context import ARTIFACT_STORE, TRANSCRIPT_STORE
-from codeharness.paths import RuntimePaths
-from codeharness.tasks import (
-    TASKS,
-    TASK_HANDLERS as TASK_SYS_HANDLERS,
-    TASK_TOOLS,
+from codeharness.core.agent import Agent
+from codeharness.goal import (
+    GOAL_TOOLS,
+    GoalController,
+    GoalEvaluator,
+    make_goal_handlers,
 )
-from codeharness.team import TEAM, TEAM_HANDLERS, TEAM_TOOLS
+from codeharness.hooks import new_session_stats, trigger_hooks
+from codeharness.mcp import (
+    MCPConfigError,
+    MCPManager,
+    load_config,
+    shutdown_runtime,
+)
+from codeharness.paths import RuntimePaths
+from codeharness.scheduler import cron
+from codeharness.skills import SkillRegistry
+from codeharness.subagent import TASK_TOOL, make_task_handler
+from codeharness.tasks import (
+    TASK_HANDLERS as TASK_SYS_HANDLERS,
+)
+from codeharness.tasks import (
+    TASK_TOOLS,
+    TASKS,
+)
+from codeharness.team import TEAM, TEAM_TOOLS, make_team_handlers
+from codeharness.team import wakeup as team_wakeup
 from codeharness.team.bus import BUS
 from codeharness.team.worktree import (
     LocalWorktreeEnvironment,
     WorktreeEnvironment,
     configure_worktrees,
 )
-from codeharness.team import wakeup as team_wakeup
+from codeharness.tools import TodoManager, WorkspaceBackend, build_base_registry
 from codeharness.workflow import (
     WORKFLOW_TOOLS,
     WorkflowEventBus,
@@ -38,19 +53,6 @@ from codeharness.workflow import (
     make_workflow_handlers,
 )
 from codeharness.workflow.builtin import register_builtins as register_builtin_workflows
-from codeharness.goal import GoalController, GoalEvaluator, GOAL_TOOLS, make_goal_handlers
-
-from codeharness.config import RuntimeConfig
-from codeharness.core.agent import Agent
-from codeharness.background import BackgroundManager
-from codeharness.mcp import (
-    MCPConfigError,
-    MCPManager,
-    load_config,
-    shutdown_runtime,
-)
-from codeharness.tools import build_base_registry, TodoManager, WorkspaceBackend
-
 
 CLOSE_TIMEOUT = 5.0
 
@@ -68,6 +70,10 @@ class CodeHarness:
     ):
         self.config = config
         self.paths = RuntimePaths.build(
+            workspace=config.workspace,
+            agent_home=config.agent_home,
+        )
+        self.skill_registry = SkillRegistry(
             workspace=config.workspace,
             agent_home=config.agent_home,
         )
@@ -167,6 +173,7 @@ class CodeHarness:
             "workflow_catalog": self.workflow_registry.catalog(),
         }
         defaults.update(kwargs)
+        defaults["skill_registry"] = self.skill_registry
         return Agent(**defaults)
 
     def start(self) -> "CodeHarness":
@@ -200,10 +207,6 @@ class CodeHarness:
         except ValueError:
             permission_roots.append(self.tool_worktrees)
         hooks.configure_permissions(permission_roots)
-        configure_subagent_agent_factory(
-            self.create_agent,
-            workspace=self.tool_workspace,
-        )
         TEAM.set_agent_factory(
             self.create_agent,
             workspace_backend=self.workspace_backend,
@@ -218,10 +221,25 @@ class CodeHarness:
             background_manager=self.background_manager,
             workspace=self.tool_workspace,
             workspace_backend=self.workspace_backend,
+            skill_registry=self.skill_registry,
         )
-        registry.register(TASK_TOOL, SUB_TASK_HANDLERS["task"])
+        registry.register(
+            TASK_TOOL,
+            make_task_handler(
+                self.create_agent,
+                workspace=self.tool_workspace,
+                skill_registry=self.skill_registry,
+            ),
+        )
         registry.extend(TASK_TOOLS, TASK_SYS_HANDLERS)
-        registry.extend(TEAM_TOOLS, TEAM_HANDLERS)
+        registry.extend(
+            TEAM_TOOLS,
+            make_team_handlers(
+                self.skill_registry,
+                agent_factory=self.create_agent,
+                workspace_backend=self.workspace_backend,
+            ),
+        )
 
         # ── Goal Loop ──
         evaluator_model = self.config.evaluator_model or self.config.model
@@ -467,11 +485,6 @@ class CodeHarness:
         try:
             if self._started:
                 trigger_hooks("Stop", self.session_stats)
-        except Exception:
-            pass
-
-        try:
-            configure_subagent_agent_factory(None)
         except Exception:
             pass
 

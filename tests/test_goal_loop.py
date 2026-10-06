@@ -6,6 +6,15 @@ from codeharness.core.agent import Agent
 from codeharness.goal import EvalResult, GoalController, GoalStatus, StopDecision
 
 
+def _skills(tmp_path):
+    from codeharness.skills import SkillRegistry
+
+    return SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
+
+
 class FakeEvaluator:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
@@ -99,7 +108,7 @@ class FakeMessage:
         return {"role": "assistant", "content": self.content}
 
 
-def test_block_feedback_is_appended_and_agent_loop_continues(monkeypatch):
+def test_block_feedback_is_appended_and_agent_loop_continues(monkeypatch, tmp_path):
     evaluator = FakeEvaluator(
         EvalResult(ok=False, reason="missing verification"),
         EvalResult(ok=True, reason="verified"),
@@ -114,6 +123,7 @@ def test_block_feedback_is_appended_and_agent_loop_continues(monkeypatch):
         handlers={},
         memory_manager=False,
         goal_controller=controller,
+        skill_registry=_skills(tmp_path),
     )
     responses = iter(
         [
@@ -136,7 +146,7 @@ def test_block_feedback_is_appended_and_agent_loop_continues(monkeypatch):
     assert len(evaluator.calls) == 2
 
 
-def test_secondary_agents_use_null_controller_and_do_not_activate_gate():
+def test_secondary_agents_use_null_controller_and_do_not_activate_gate(tmp_path):
     agent = Agent(
         client=object(),
         model="test",
@@ -144,6 +154,7 @@ def test_secondary_agents_use_null_controller_and_do_not_activate_gate():
         tools=[],
         handlers={},
         memory_manager=False,
+        skill_registry=_skills(tmp_path),
     )
     controller = agent.goal_controller
     controller.set_goal("this must not gate subagents")

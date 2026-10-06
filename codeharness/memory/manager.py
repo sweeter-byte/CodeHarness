@@ -391,7 +391,8 @@ class MemoryManager:
     def _parse_frontmatter(content: str) -> tuple[dict, str]:
         """Extract YAML-like frontmatter between --- delimiters.
 
-        Returns (metadata_dict, body_text). Same approach as SkillLoader.
+        Returns (metadata_dict, body_text). Uses the same lightweight
+        frontmatter rules as SkillRegistry.
         """
         if not content.startswith("---"):
             return {}, content

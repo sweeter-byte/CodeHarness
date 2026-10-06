@@ -1,11 +1,20 @@
 import inspect
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import pytest
 
 
 def _agent(agent_module, **kwargs):
+    from codeharness.skills import SkillRegistry
+
+    with TemporaryDirectory(prefix="codeharness-agent-test-") as directory:
+        root = Path(directory)
+        skill_registry = SkillRegistry(
+            workspace=root,
+            agent_home=root / "agent-home",
+        )
     defaults = {
         "client": object(),
         "model": "test-model",
@@ -13,6 +22,7 @@ def _agent(agent_module, **kwargs):
         "tools": [],
         "handlers": {},
         "memory_manager": False,
+        "skill_registry": skill_registry,
     }
     defaults.update(kwargs)
     return agent_module.Agent(**defaults)
@@ -22,7 +32,6 @@ def _ask_on_pre_tool_use(monkeypatch, agent_module, reason="approval needed"):
     def trigger_hooks(event, *args):
         if event == "PreToolUse":
             agent_module.hooks.PENDING_USER_ASK.value = reason
-        return None
 
     monkeypatch.setattr(agent_module, "trigger_hooks", trigger_hooks)
 
@@ -294,10 +303,15 @@ def test_agent_background_bash_always_executes_through_handler(monkeypatch):
     assert messages[-1]["content"] == "started by handler"
 
 
-def test_subagent_uses_configured_agent_factory_and_workspace(monkeypatch, tmp_path):
+def test_subagent_task_handler_binds_factory_workspace_and_skills(tmp_path):
     from codeharness import subagent
+    from codeharness.skills import SkillRegistry
 
     created = []
+    skills = SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
 
     class FakeAgent:
         def agent_loop(self, messages):
@@ -308,31 +322,40 @@ def test_subagent_uses_configured_agent_factory_and_workspace(monkeypatch, tmp_p
         created.append(kwargs)
         return FakeAgent()
 
-    monkeypatch.setattr(subagent, "_agent_factory", None, raising=False)
-    subagent.configure_agent_factory(factory, workspace=str(tmp_path))
+    handler = subagent.make_task_handler(
+        factory,
+        workspace=str(tmp_path),
+        skill_registry=skills,
+    )
 
-    assert subagent.run_task("inspect it") == "summary"
+    assert handler("inspect it") == "summary"
     assert len(created) == 1
     assert str(tmp_path) in created[0]["system"]
+    assert skills.catalog() in created[0]["system"]
+    assert created[0]["skill_registry"] is skills
     assert "tools" not in created[0]
     assert "handlers" not in created[0]
     assert created[0]["interactive"] is True
 
 
-def test_subagent_without_factory_fails_loudly(monkeypatch):
-    from codeharness import subagent
-
-    monkeypatch.setattr(subagent, "_agent_factory", None, raising=False)
-
-    with pytest.raises(RuntimeError, match="agent factory"):
-        subagent.run_task("inspect it")
-
-
 def test_team_manager_uses_configured_agent_factory(monkeypatch, tmp_path):
+    from codeharness.skills import SkillRegistry
     from codeharness.team import manager as manager_module
 
     created = []
     task = SimpleNamespace(id="task_factory", subject="subject", description="desc")
+    project_skill = (
+        tmp_path / ".codeharness" / "skills" / "bug-fix" / "SKILL.md"
+    )
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: bug-fix\ndescription: Project override\n---\nproject body\n",
+        encoding="utf-8",
+    )
+    skills = SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
 
     class FakeAgent:
         pass
@@ -355,16 +378,109 @@ def test_team_manager_uses_configured_agent_factory(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(manager_module.threading, "Thread", FakeThread)
 
-    result = manager.spawn(task.id, name="Alice")
+    result = manager.spawn(task.id, name="Alice", skill_registry=skills)
 
     assert result.startswith("Spawned teammate Alice")
     assert len(created) == 1
+    assert created[0]["skill_registry"] is skills
+    assert skills.catalog() in created[0]["system"]
+    assert created[0]["handlers"]["load_skill"]("bug-fix") == skills.load(
+        "bug-fix"
+    )
     assert created[0]["interactive"] is False
     assert created[0]["memory_manager"] is False
     assert manager.get_state("Alice").agent.__class__ is FakeAgent
 
 
-def test_team_manager_without_factory_fails_before_claim(monkeypatch):
+def test_bound_team_handler_keeps_its_runtime_factory_registry_and_backend(
+    monkeypatch, tmp_path
+):
+    from codeharness.skills import SkillRegistry
+    from codeharness.team import manager as manager_module
+    from codeharness.team.tools import make_team_handlers
+
+    def skills(root, description):
+        manifest = root / ".codeharness/skills/runtime-skill/SKILL.md"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            f"---\nname: runtime-skill\ndescription: {description}\n---\n"
+            f"{description} body\n",
+            encoding="utf-8",
+        )
+        return SkillRegistry(workspace=root, agent_home=root / "agent-home")
+
+    skills_a = skills(tmp_path / "runtime-a", "Runtime A")
+    skills_b = skills(tmp_path / "runtime-b", "Runtime B")
+    created_a = []
+    created_b = []
+    backend_calls = []
+
+    class FakeAgent:
+        pass
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            pass
+
+    class Backend:
+        def __init__(self, name):
+            self.name = name
+
+        def write_file(self, path, content, cwd=None):
+            backend_calls.append((self.name, path, content, cwd))
+            return self.name
+
+    backend_a = Backend("backend-a")
+    backend_b = Backend("backend-b")
+
+    def factory_a(**kwargs):
+        created_a.append(kwargs)
+        return FakeAgent()
+
+    def factory_b(**kwargs):
+        created_b.append(kwargs)
+        return FakeAgent()
+
+    manager = manager_module.TeamManager()
+    handlers_a = make_team_handlers(
+        skills_a,
+        agent_factory=factory_a,
+        workspace_backend=backend_a,
+        team_manager=manager,
+    )
+    manager.set_agent_factory(factory_b, workspace_backend=backend_b)
+    task = SimpleNamespace(id="task_a", subject="subject", description="desc")
+    monkeypatch.setattr(
+        manager_module.TASKS,
+        "claim",
+        lambda *args, **kwargs: (task, str(tmp_path / "runtime-a"), None),
+    )
+    monkeypatch.setattr(manager_module.threading, "Thread", FakeThread)
+
+    result = handlers_a["spawn_teammate"](task.id, name="Alice")
+
+    assert result.startswith("Spawned teammate Alice")
+    assert len(created_a) == 1
+    assert created_b == []
+    assert created_a[0]["skill_registry"] is skills_a
+    assert skills_a.catalog() in created_a[0]["system"]
+    assert skills_b.catalog() not in created_a[0]["system"]
+    assert created_a[0]["handlers"]["load_skill"]("runtime-skill") == (
+        skills_a.load("runtime-skill")
+    )
+    assert created_a[0]["handlers"]["write_file"](
+        path="result.txt",
+        content="A",
+    ) == "backend-a"
+    assert backend_calls == [
+        ("backend-a", "result.txt", "A", str(tmp_path / "runtime-a"))
+    ]
+
+
+def test_team_manager_requires_skill_registry_before_claim(monkeypatch):
     from codeharness.team import manager as manager_module
 
     manager = manager_module.TeamManager()
@@ -375,7 +491,33 @@ def test_team_manager_without_factory_fails_before_claim(monkeypatch):
         lambda *args, **kwargs: claim_calls.append(args),
     )
 
-    result = manager.spawn("task_factory", name="Alice")
+    with pytest.raises(TypeError, match="skill_registry"):
+        manager.spawn("task_factory", name="Alice")
+
+    assert claim_calls == []
+
+
+def test_team_manager_without_factory_fails_before_claim(monkeypatch, tmp_path):
+    from codeharness.skills import SkillRegistry
+    from codeharness.team import manager as manager_module
+
+    manager = manager_module.TeamManager()
+    skills = SkillRegistry(
+        workspace=tmp_path,
+        agent_home=tmp_path / "agent-home",
+    )
+    claim_calls = []
+    monkeypatch.setattr(
+        manager_module.TASKS,
+        "claim",
+        lambda *args, **kwargs: claim_calls.append(args),
+    )
+
+    result = manager.spawn(
+        "task_factory",
+        name="Alice",
+        skill_registry=skills,
+    )
 
     assert result.startswith("Error: agent factory")
     assert claim_calls == []
@@ -407,7 +549,8 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
     child = harness.create_agent(system="child")
 
     assert isinstance(child, FakeAgent)
-    assert created == [{
+    assert len(created) == 1
+    assert created[0] == {
         "system": "child",
         "client": harness.client,
         "model": "runtime-model",
@@ -420,7 +563,9 @@ def test_runtime_agent_factory_inherits_model_and_workspace(monkeypatch, tmp_pat
         "session_stats": harness.session_stats,
         "session_stats_lock": harness._session_stats_lock,
         "workflow_catalog": harness.workflow_registry.catalog(),
-    }]
+        "skill_registry": harness.skill_registry,
+    }
+    assert created[0]["skill_registry"] is harness.skill_registry
 
 
 def test_runtime_agent_factory_propagates_tool_workspace_and_backend(
@@ -515,11 +660,23 @@ def test_runtime_agent_factory_respects_explicit_overrides(monkeypatch, tmp_path
     harness.client = object()
     monkeypatch.setattr(app_module, "Agent", FakeAgent)
     override_client = object()
+    from codeharness.skills import SkillRegistry
 
-    harness.create_agent(client=override_client, model="override")
+    other_skills = SkillRegistry(
+        workspace=tmp_path / "other",
+        agent_home=tmp_path / "other-home",
+    )
+
+    harness.create_agent(
+        client=override_client,
+        model="override",
+        skill_registry=other_skills,
+    )
 
     assert created[0]["client"] is override_client
     assert created[0]["model"] == "override"
+    assert created[0]["skill_registry"] is harness.skill_registry
+    assert created[0]["skill_registry"] is not other_skills
 
 
 def test_cli_registers_handlers_and_approval_accepts_only_y():
@@ -538,7 +695,7 @@ def test_cli_registers_handlers_and_approval_accepts_only_y():
     answers = iter(["Y", "yes", "n"])
     output = []
     harness = FakeHarness()
-    cli = CLI(
+    CLI(
         harness,
         input_fn=lambda _prompt: next(answers),
         output_fn=output.append,
