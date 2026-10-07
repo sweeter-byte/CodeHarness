@@ -25,6 +25,18 @@ ZERO_STATS = {
     "tool_calls": 0,
 }
 
+_WORKSPACE_FILE_MUTATION_APPROVALS = frozenset(
+    {
+        "File modification: write_file",
+        "File modification: edit_file",
+    }
+)
+
+
+def _approve_boundary_checked_file_mutation(reason: str) -> bool:
+    """Approve only path-safe native file mutations in evaluation rollouts."""
+    return reason in _WORKSPACE_FILE_MUTATION_APPROVALS
+
 
 class SWEbenchCodeHarnessAdapter(CodeHarnessAdapter):
     """Run a SWE-bench task in host mode or one borrowed container."""
@@ -52,6 +64,10 @@ class SWEbenchCodeHarnessAdapter(CodeHarnessAdapter):
                 tool_worktrees="/tmp/codeharness-worktrees",
             )
         try:
+            if container_id is not None:
+                harness.set_approval_handler(
+                    _approve_boundary_checked_file_mutation
+                )
             harness.start()
             final_answer = harness.run(task)
             stats = {

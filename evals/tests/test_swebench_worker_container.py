@@ -29,12 +29,16 @@ class _RecordingHarness:
         self.started = False
         self.closed = False
         self.tasks: list[str] = []
+        self.approval_handler = None
         self.session_stats = {
             "prompt_tokens": 2,
             "completion_tokens": 3,
             "total_tokens": 5,
             "tool_calls": 1,
         }
+
+    def set_approval_handler(self, handler) -> None:
+        self.approval_handler = handler
 
     def start(self) -> None:
         self.started = True
@@ -128,6 +132,15 @@ def test_container_mode_builds_one_runtime_against_one_borrowed_container(
     assert harness.started is True
     assert harness.tasks == ["fix it"]
     assert harness.closed is True
+    assert harness.approval_handler is not None
+    assert harness.approval_handler("File modification: write_file") is True
+    assert harness.approval_handler("File modification: edit_file") is True
+    assert harness.approval_handler(
+        "Path outside allowed directories: /tmp/outside.py"
+    ) is False
+    assert harness.approval_handler(
+        r"Command matches approval rule: \brm\s+"
+    ) is False
     assert result == AdapterResult("done", harness.session_stats)
 
 
@@ -148,6 +161,150 @@ def test_host_mode_keeps_legacy_single_argument_harness_factory(tmp_path):
     assert len(calls) == 1
     assert len(calls[0][0]) == 1
     assert calls[0][1] == {}
+    assert harness.approval_handler is None
+
+
+def test_container_mode_only_approves_boundary_checked_file_mutations(
+    monkeypatch, tmp_path
+):
+    from codeharness import app as app_module
+
+    observations = {}
+
+    class RecordingBackend:
+        def __init__(self, container):
+            self.container = container
+            self.calls = []
+
+        def bash(self, command, run_in_background=False, cwd=None):
+            self.calls.append(("bash", command, run_in_background, cwd))
+            return "container bash"
+
+        def read_file(self, path, start_line=None, end_line=None, cwd=None):
+            self.calls.append(("read_file", path, start_line, end_line, cwd))
+            return "container read"
+
+        def write_file(self, path, content, cwd=None):
+            self.calls.append(("write_file", path, content, cwd))
+            return "container write"
+
+        def edit_file(self, path, old_text, new_text, cwd=None):
+            self.calls.append(("edit_file", path, old_text, new_text, cwd))
+            return "container edit"
+
+        def glob(self, pattern, cwd=None):
+            self.calls.append(("glob", pattern, cwd))
+            return "container glob"
+
+        def grep(self, pattern, path=".", file_pattern=None, cwd=None):
+            self.calls.append(("grep", pattern, path, file_pattern, cwd))
+            return "container grep"
+
+    class RecordingWorktreeEnvironment:
+        def __init__(self, container):
+            self.container = container
+
+        def git(self, args, cwd):
+            return 0, ""
+
+        def path_exists(self, path):
+            return False
+
+    class InspectingHarness(CodeHarness):
+        def run(self, task):
+            messages = []
+            operations = [
+                (
+                    "write_file",
+                    {"path": "/testbed/inside.py", "content": "x"},
+                ),
+                (
+                    "edit_file",
+                    {
+                        "path": (
+                            "/tmp/codeharness-worktrees/task-a/inside.py"
+                        ),
+                        "old_text": "x",
+                        "new_text": "y",
+                    },
+                ),
+                (
+                    "write_file",
+                    {"path": "/tmp/outside.py", "content": "x"},
+                ),
+                (
+                    "write_file",
+                    {"path": "/opt/outside.py", "content": "x"},
+                ),
+                (
+                    "write_file",
+                    {
+                        "path": "/testbed/../tmp/escape.py",
+                        "content": "x",
+                    },
+                ),
+            ]
+            results = []
+            for index, (tool_name, args) in enumerate(operations):
+                results.append(
+                    self.agent._execute_tool(
+                        self.agent.handlers[tool_name],
+                        f"call-{index}",
+                        tool_name,
+                        args,
+                        messages,
+                    )
+                )
+            observations.update(
+                results=results,
+                messages=messages,
+                backend=self.workspace_backend,
+            )
+            return "inspected"
+
+    monkeypatch.setattr(worker_module, "DockerWorkspaceBackend", RecordingBackend)
+    monkeypatch.setattr(
+        worker_module,
+        "DockerWorktreeEnvironment",
+        RecordingWorktreeEnvironment,
+    )
+    monkeypatch.setattr(app_module, "OpenAI", lambda **kwargs: object())
+    monkeypatch.setattr(app_module, "load_config", lambda path: {})
+    monkeypatch.setattr(app_module, "MCPManager", _FakeMCPManager)
+    monkeypatch.setattr(app_module, "shutdown_runtime", lambda: None)
+    monkeypatch.setattr(app_module.cron, "start", lambda **kwargs: None)
+    monkeypatch.setattr(app_module.cron, "stop", lambda: True)
+    monkeypatch.setattr(app_module.team_wakeup, "start", lambda **kwargs: None)
+    monkeypatch.setattr(app_module.team_wakeup, "stop", lambda: True)
+    adapter = worker_module.SWEbenchCodeHarnessAdapter(
+        _environment(), harness_factory=InspectingHarness
+    )
+
+    result = adapter.run_task(
+        "inspect approval policy",
+        tmp_path / "host-runtime-state",
+        tmp_path / "agent-home",
+        container_id="borrowed-container",
+    )
+
+    assert result.final_answer == "inspected"
+    assert observations["results"] == [True, True, False, False, False]
+    assert observations["backend"].calls == [
+        ("write_file", "/testbed/inside.py", "x", None),
+        (
+            "edit_file",
+            "/tmp/codeharness-worktrees/task-a/inside.py",
+            "x",
+            "y",
+            None,
+        ),
+    ]
+    rejected_messages = observations["messages"][2:]
+    assert len(rejected_messages) == 3
+    assert all(
+        "User rejected" in message["content"]
+        for message in rejected_messages
+    )
 
 
 def test_container_mode_runtime_keeps_leader_subagent_team_and_workflow_tools(
