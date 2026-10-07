@@ -54,7 +54,10 @@ def test_default_prompt_uses_exact_runtime_skill_catalog(tmp_path):
     )
 
     assert f"You are a coding agent at {tmp_path}." in prompt
-    assert "FIRST call todo_write" in prompt
+    assert (
+        "after loading applicable skills, call todo_write"
+        in prompt
+    )
     assert "task' tool" in prompt
     assert "LEADER of an optional agent team" in prompt
     assert "Available Workflows:\nworkflow-a" in prompt

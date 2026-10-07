@@ -18,8 +18,10 @@ def build_default_system_prompt(
     catalog = skill_registry.catalog()
     return (
         f"You are a coding agent at {workspace}. Use tools to solve tasks. Act, don't explain.\n"
-        f"For any multi-step task, FIRST call {TODO_TOOL_NAME} to list the plan, "
-        "then update item statuses as you work; keep exactly one item in_progress.\n"
+        "For any multi-step task, after loading applicable skills, call "
+        f"{TODO_TOOL_NAME} to list the plan before other task-specific work; "
+        "then update item statuses as you work and keep exactly one item "
+        "in_progress.\n"
         "Delegate self-contained subtasks (e.g. tracing a call chain across many files) "
         "to the 'task' tool so their intermediate steps don't pollute your context.\n\n"
         "You are also the LEADER of an optional agent team. When parallel work would "
