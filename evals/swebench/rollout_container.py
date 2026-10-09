@@ -93,7 +93,7 @@ class SWEbenchRolloutContainer:
         *,
         executable_finder: ExecutableFinder = shutil.which,
         command_runner: CommandRunner = subprocess.run,
-        timeout: int = 120,
+        timeout: int = 600,
     ) -> None:
         self.instance = instance
         self.run_id = run_id
